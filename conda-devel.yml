@@ -1,0 +1,20 @@
+name: annealing_sign_problem
+channels:
+  - conda-forge
+  - pytorch
+  - twesterhout
+dependencies:
+  - python
+  - pip
+  - pip:
+    - black
+      # - grip
+    - loguru
+    - neovim
+  # - cpuonly
+  # - nqs-playground
+  - lattice-symmetries
+  - ising-glass-annealer
+  - numpy
+  - scipy
+  - matplotlib
