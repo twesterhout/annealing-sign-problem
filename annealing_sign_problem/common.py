@@ -51,12 +51,12 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     spins = np.asarray(spins, dtype=np.uint64, order="C")
     if spins.ndim < 2:
         spins = spins.reshape(-1, 1)
-    spins, counts = np.unique(spins, return_counts=True, axis=0)
-    ψs = log_ψ(spins).squeeze(axis=1)
+    # spins, counts = np.unique(spins, return_counts=True, axis=0)
+    ψs = log_ψ(spins).numpy().squeeze(axis=1)
     spins = [_ls_bits512_to_int(σ) for σ in spins]
 
     other_spins, coeffs, part_lengths = batched_apply(spins, hamiltonian)
-    other_ψs = log_ψ(other_spins).squeeze(axis=1)
+    other_ψs = log_ψ(other_spins).numpy().squeeze(axis=1)
     other_spins = [_ls_bits512_to_int(σ) for σ in other_spins]
 
     scale = np.max(other_ψs.real)
@@ -89,5 +89,21 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
                     field[i] += c * other_ψ.real / abs(ψ.real)
                 else:
                     field[i] += c * other_ψ.real * abs(ψ.real)
+        offset += part_lengths[i]
+    Jmax = max(map(lambda t: abs(t[2]), matrix))
+    matrix = list(filter(lambda t: abs(t[2]) > 1e-8 * Jmax, matrix))
 
-    return spins, matrix, field
+    # print(matrix, field)
+    matrix = scipy.sparse.coo_matrix(
+        ([d for (_, _, d) in matrix],
+        ([i for (i, _, _) in matrix], [j for (_, j, _) in matrix])),
+        shape=(len(field), len(field))
+    )
+    return sa.Hamiltonian(matrix, field), spins
+
+
+def optimize_sign_structure(epochs: int = 2):
+    for epoch in range(epochs):
+        pass
+
+
