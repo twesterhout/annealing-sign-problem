@@ -51,7 +51,9 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     spins = np.asarray(spins, dtype=np.uint64, order="C")
     if spins.ndim < 2:
         spins = spins.reshape(-1, 1)
-    # spins, counts = np.unique(spins, return_counts=True, axis=0)
+    spins, counts = np.unique(spins, return_counts=True, axis=0)
+    if not sampled:
+        assert np.all(counts == 1)
     ψs = log_ψ(spins).numpy().squeeze(axis=1)
     spins = [_ls_bits512_to_int(σ) for σ in spins]
 
@@ -69,9 +71,12 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     field = np.zeros(len(spins), dtype=np.float64)
 
     offset = 0
+    x0 = np.zeros((len(spins) + 63) // 64, dtype=np.uint64)
     for i, σ in enumerate(spins):
         ψ = ψs[i]
         assert np.isclose(ψ.imag, 0)
+        if ψ > 0:
+            x0[i // 64] |= np.uint64(1) << np.uint64(i % 64)
         for (other_σ, c, other_ψ) in zip(
             other_spins[offset : offset + part_lengths[i]],
             coeffs[offset : offset + part_lengths[i]],
@@ -81,12 +86,12 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
             if other_σ in spins:
                 j = spins.index(other_σ)
                 if sampled:
-                    matrix.append((i, j, c * abs(other_ψ.real) / abs(ψ.real)))
+                    matrix.append((i, j, c * counts[i] * abs(other_ψ.real) / abs(ψ.real)))
                 else:
                     matrix.append((i, j, c * abs(other_ψ.real) * abs(ψ.real)))
             else:
                 if sampled:
-                    field[i] += c * other_ψ.real / abs(ψ.real)
+                    field[i] += c * counts[i] * other_ψ.real / abs(ψ.real)
                 else:
                     field[i] += c * other_ψ.real * abs(ψ.real)
         offset += part_lengths[i]
@@ -99,7 +104,8 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         ([i for (i, _, _) in matrix], [j for (_, j, _) in matrix])),
         shape=(len(field), len(field))
     )
-    return sa.Hamiltonian(matrix, field), spins
+    spins = np.stack([_int_to_ls_bits512(σ) for σ in spins])
+    return sa.Hamiltonian(matrix, field), spins, x0
 
 
 def optimize_sign_structure(epochs: int = 2):
