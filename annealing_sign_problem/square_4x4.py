@@ -7,6 +7,8 @@ from torch import Tensor
 import time
 from loguru import logger
 
+def project_dir():
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 def _load_ground_state(filename: str):
     import h5py
@@ -119,7 +121,7 @@ def compute_average_loss(dataset, model, loss_fn, accuracy_fn):
 
 
 def tune_neural_network(
-    model, spins, target_signs, weights=None, epochs: int = 30, batch_size: int = 64
+    model, spins, target_signs, weights=None, epochs: int = 100, batch_size: int = 32
 ):
     if weights is None:
         weights = torch.ones_like(target_signs, dtype=torch.float32)
@@ -143,7 +145,8 @@ def tune_neural_network(
         batch_size=batch_size,
         shuffle=True,
     )
-    optimizer = torch.optim.SGD(model.parameters(), lr=5e-3, momentum=0.9, weight_decay=1e-4)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=5e-3, momentum=0.9, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay=5e-5)
     scheduler = None
 
     info = compute_average_loss(dataset, model, loss_fn, accuracy_fn)
@@ -163,11 +166,11 @@ def tune_neural_network(
 
 def optimize_sign_structure(spins, hamiltonian, log_psi, sampled=False):
     # extract_classical_ising_model(spins, hamiltonian, log_psi, sampled=sampled)
-    ising_hamiltonian, spins, x0 = extract_classical_ising_model_v2(
+    ising_hamiltonian, spins, x0 = extract_classical_ising_model(
         spins, hamiltonian, log_psi, sampled=sampled
     )
     configuration, _, best_energy = sa.anneal(
-        ising_hamiltonian, x0, number_sweeps=3000, beta0=10, beta1=1000
+        ising_hamiltonian, x0, number_sweeps=10000, beta0=10, beta1=10000
     )
     # print(best_energy[0], best_energy[-1])
     i = np.arange(spins.shape[0], dtype=np.uint64)
@@ -195,14 +198,14 @@ def find_sign_structure_neural(model, ground_state, hamiltonian):
     ).real
     get_accuracy = lambda: (correct_sign_structure == predict_signs()).float().mean().item()
     get_overlap = lambda: torch.dot(ground_state, ground_state.abs() * predict_signs()).item()
-    print("Ground state energy: ", hamiltonian.expectation(ground_state.numpy()).real)
+    # print("Ground state energy: ", hamiltonian.expectation(ground_state.numpy()).real)
     print("Initially: ", get_energy(), get_accuracy(), get_overlap())
     p = ground_state.abs() ** 2
 
     for i in range(100):
         # order = torch.randperm(basis.number_states)
         # batch_indices = order[:1024]
-        batch_indices = np.random.choice(basis.number_states, size=10240, replace=True, p=p)
+        batch_indices = np.random.choice(basis.number_states, size=40960, replace=True, p=p)
 
         spins = basis.states[batch_indices]
         log_psi = make_log_coeff_fn(ground_state.abs() * predict_signs(), basis)
@@ -214,18 +217,19 @@ def find_sign_structure_neural(model, ground_state, hamiltonian):
         weights = None
         # (ground_state.abs() ** 2)[basis.batched_index(spins).view(np.int64)].float()
         tune_neural_network(model, torch.from_numpy(spins.view(np.int64)), signs, weights)
-        print("Energy: ", get_energy(), get_accuracy(), get_overlap())
+        if i % 10 == 9:
+            print("Energy: ", get_energy(), get_accuracy(), get_overlap())
 
 
 def main():
     ground_state, E, representatives = _load_ground_state(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.h5"
-        "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x6.h5"
+        os.path.join(project_dir(), "data/symm/j1j2_square_6x6.h5")
         # "/home/tom/src/spin-ed/data/heisenberg_kagome_16.h5"
     )
     basis, hamiltonian = _load_basis_and_hamiltonian(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.yaml"
-        "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x6.yaml"
+        os.path.join(project_dir(), "data/symm/j1j2_square_6x6.yaml")
         # "/home/tom/src/spin-ed/example/heisenberg_kagome_16.yaml"
     )
     basis.build(representatives)
@@ -233,14 +237,15 @@ def main():
     print(E)
 
     torch.manual_seed(123)
+    np.random.seed(127)
 
     model = torch.nn.Sequential(
         nqs.Unpack(basis.number_spins),
-        torch.nn.Linear(basis.number_spins, 64),
+        torch.nn.Linear(basis.number_spins, 128),
         torch.nn.ReLU(),
-        torch.nn.Linear(64, 64),
+        torch.nn.Linear(128, 128),
         torch.nn.ReLU(),
-        torch.nn.Linear(64, 2, bias=False),
+        torch.nn.Linear(128, 2, bias=False),
     )
     find_sign_structure_neural(model, ground_state, hamiltonian)
 
