@@ -151,7 +151,7 @@ def tune_neural_network(
     scheduler = None
 
     info = compute_average_loss(dataset, model, loss_fn, accuracy_fn)
-    logger.debug("Initially: loss = {}, accuracy = {}", info["loss"], info["accuracy"])
+    #logger.debug("Initially: loss = {}, accuracy = {}", info["loss"], info["accuracy"])
     # if info["accuracy"] < 0.3:
     #     logger.warning("Flipping signs globally...")
     #     target_signs = 1 - target_signs
@@ -162,7 +162,7 @@ def tune_neural_network(
         global_index = info["global_index"]
         # logger.debug("[{}/{}]  : loss = {}", epoch + 1, epochs, info["loss"])
     info = compute_average_loss(dataset, model, loss_fn, accuracy_fn)
-    logger.debug("Finally  : loss = {}, accuracy = {}", info["loss"], info["accuracy"])
+    #logger.debug("Finally  : loss = {}, accuracy = {}", info["loss"], info["accuracy"])
 
 
 def optimize_sign_structure(spins, hamiltonian, log_psi, number_sweeps=10000, beta0=10, beta1=10000, sampled=False):
@@ -221,8 +221,10 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0=10, beta1
         weights = None
         # (ground_state.abs() ** 2)[basis.batched_index(spins).view(np.int64)].float()
         tune_neural_network(model, torch.from_numpy(spins.view(np.int64)), signs, weights, epochs, learning_batch, lr, weight_decay)
-        if i % 5 == 4:
-            print("Energy: ", get_energy(), get_accuracy(), get_overlap())
+        #if i % 5 == 4:
+        #    print("Energy: ", get_energy(), get_accuracy(), get_overlap())
+
+    return 1 - np.abs(get_overlap())
 
 
 def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch):
@@ -239,7 +241,7 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
     )
     basis.build(representatives)
     representatives = None
-    print(E)
+    #print(E)
 
     torch.manual_seed(123)
     np.random.seed(127)
@@ -252,8 +254,8 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
         torch.nn.ReLU(),
         torch.nn.Linear(128, 2, bias=False),
     )
-    find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch)
-
+    loss = find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch)
+    return loss
 
 if __name__ == "__main__":
     main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch)
