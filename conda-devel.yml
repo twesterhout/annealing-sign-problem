@@ -12,9 +12,11 @@ dependencies:
     - loguru
     - neovim
   # - cpuonly
-  # - nqs-playground
+  - nqs-playground
   - lattice-symmetries
   - ising-glass-annealer
+  - h5py
+  - pyyaml
   - numpy
   - scipy
   - matplotlib
