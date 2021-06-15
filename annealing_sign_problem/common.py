@@ -108,7 +108,12 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     ψs = np.ascontiguousarray(ψs.real)
 
     if sampled:
+        normalization = 1 / np.sqrt(np.sum(counts))
         ψs = 1 / ψs
+    else:
+        normalization = 1 / np.linalg.norm(ψs)
+    ψs *= normalization
+    other_ψs *= normalization
 
     field = np.zeros(spins.shape[0], dtype=np.float64)
     row_indices = np.empty(other_spins.shape[0], dtype=np.uint32)
@@ -136,6 +141,9 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         (elements, (row_indices, col_indices)),
         shape=(spins.shape[0], spins.shape[0]),
     )
+    matrix = matrix.tocsr()
+    matrix = 0.5 * (matrix + matrix.T)
+    matrix = matrix.tocoo()
     h = sa.Hamiltonian(matrix, field)
 
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
@@ -144,7 +152,8 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         ψs.ctypes.data_as(POINTER(c_double)),
         x0.ctypes.data_as(POINTER(c_uint64)),
     )
-    logger.info("Done! The Hamiltonian contains {} non-zero elements", written)
+    logger.info("Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
+                written, np.abs(matrix.data).min(), np.abs(matrix.data).max())
     return h, spins, x0
 
 
