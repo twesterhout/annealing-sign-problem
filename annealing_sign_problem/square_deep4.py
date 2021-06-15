@@ -225,8 +225,8 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0=10, beta1
         weights = None
         # (ground_state.abs() ** 2)[basis.batched_index(spins).view(np.int64)].float()
         tune_neural_network(model, torch.from_numpy(spins.view(np.int64)), signs, weights, epochs, learning_batch, lr, weight_decay)
-        #if i % 5 == 4:
-        #    print("Energy: ", get_energy(), get_accuracy(), get_overlap())
+        if i % 5 == 4:
+            print("Energy: ", get_energy(), get_accuracy(), get_overlap())
 
     return 1 - np.abs(get_overlap())
 
@@ -239,16 +239,19 @@ def pad_circular(x, pad):
 
 class Net(torch.nn.Module):   
 
-    def __init__(self, shape: Tuple[int, int], features1: int, features2: int, window: int):
+    def __init__(self, shape: Tuple[int, int], features1: int, features2: int, features3: int, features4: int, window: int):
         super().__init__()
         self._shape = shape
         self._conv1 = torch.nn.Conv2d(1, features1, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
         self._conv2 = torch.nn.Conv2d(features1, features2, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
-        #self._conv3 = torch.nn.Conv2d(64, 128, 5, stride=1, padding = 0, dilation=1, groups=1, bias=True)
-        self._dense6 = torch.nn.Linear(features2, 2, bias=True)
-        self.dropout = torch.nn.Dropout(0.3)
+        self._conv3 = torch.nn.Conv2d(features2, features3, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._conv4 = torch.nn.Conv2d(features3, features4, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._dense6 = torch.nn.Linear(features4, 2, bias=True)
+        #self.dropout = torch.nn.Dropout(0.3)
         self._padding = window//2
         self._features2 = features2
+        self._features3 = features3
+        self._features4 = features4
 #    @torch.jit.script_method
     def forward(self, x):
         x = nqs.unpack(x, self._shape[0]*self._shape[1])
@@ -259,16 +262,19 @@ class Net(torch.nn.Module):
         x = pad_circular(x, self._padding)
         x = self._conv2(x)
         x = torch.nn.functional.relu(x)
-        #x = pad_circular(x, 1)
-        #x = self._conv3(x)
-        #x = torch.nn.functional.relu(x)
-        x = x.view(x.shape[0], self._features2, -1)
+        x = pad_circular(x, self._padding)
+        x = self._conv3(x)
+        x = torch.nn.functional.relu(x)
+        x = pad_circular(x, self._padding)
+        x = self._conv4(x)
+        x = torch.nn.functional.relu(x)
+        x = x.view(x.shape[0], self._features4, -1)
         x = x.mean(dim = 2)
         x = self._dense6(x)
         return x
 
 
-def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, window):
+def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, features4, window):
 
     ground_state, E, representatives = _load_ground_state(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.h5"
@@ -293,10 +299,12 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
     #    torch.nn.ReLU(),
     #    torch.nn.Linear(128, 128),
     #    torch.nn.ReLU(),
+    #    torch.nn.Linear(128, 128),
+    #    torch.nn.ReLU(),
     #    torch.nn.Linear(128, 2, bias=False),
     #)
 
-    model = Net((4, 6), features1, features2, window)
+    model = Net((4, 6), features1, features2, features3, features4, window)
 
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print("Parameters in total", pytorch_total_params)
@@ -308,4 +316,4 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
     return loss
 
 if __name__ == "__main__":
-    main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, window)
+    main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, features4, window)
