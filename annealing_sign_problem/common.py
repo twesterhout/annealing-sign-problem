@@ -157,13 +157,10 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         ψs.ctypes.data_as(POINTER(c_double)),
         x0.ctypes.data_as(POINTER(c_uint64)),
     )
-<<<<<<< HEAD
-    logger.info("Done! The Hamiltonian contains {} non-zero elements", written)
-#    return h, spins, x0, matrix, field
-=======
+
     logger.info("Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
                 written, np.abs(matrix.data).min(), np.abs(matrix.data).max())
->>>>>>> 866764d9eed20cc3e9f9a389c302c26a005a6581
+
     return h, spins, x0
 
 
