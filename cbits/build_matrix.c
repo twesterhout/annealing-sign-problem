@@ -54,17 +54,18 @@ __attribute__((visibility("default"))) uint64_t build_matrix(
       }
     }
   }
-  uint64_t new_size = 0;
-  double const cutoff = 1e-8 * t_max;
-  for (uint64_t i = 0; i < size; ++i) {
-    if (fabs(elements[i]) > cutoff) {
-      row_indices[new_size] = row_indices[i];
-      col_indices[new_size] = col_indices[i];
-      elements[new_size] = elements[i];
-      ++new_size;
-    }
-  }
-  return new_size;
+  return size;
+  // uint64_t new_size = 0;
+  // double const cutoff = 1e-8 * t_max;
+  // for (uint64_t i = 0; i < size; ++i) {
+  //   if (fabs(elements[i]) > cutoff) {
+  //     row_indices[new_size] = row_indices[i];
+  //     col_indices[new_size] = col_indices[i];
+  //     elements[new_size] = elements[i];
+  //     ++new_size;
+  //   }
+  // }
+  // return new_size;
 }
 
 __attribute__((visibility("default"))) void
