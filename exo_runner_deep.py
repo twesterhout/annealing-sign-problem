@@ -16,33 +16,27 @@ def objective(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, e
     return annealing_sign_problem.square_deep.main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, window)
 
 start = time.time()
-objective(10, 10000, 10000, 5000, 1e-3, 5e-5, 20, 50, 1024, 28, 28, 20, 5)
+objective(6, 10000, 10000, 20000, 0.000152338, 5e-5, 40, 50, 256, 28, 28, 20, 5)
 print("time ", time.time() - start)
 sys.exit()
-
-def toy_function(config):
-
-    lr = config["lr"]
-    wd = config["wd"]
-    score = (lr-2)**2 + (wd+3.28)**4
-    tune.report(mean_loss=score)
 
 def training_function(config):
     # Hardcoded hyperparameters
 
-    beta0 = 10
+    beta0 = 6
     beta1 = 10000
     sweep_sa = 10000
-    sign_batch = 5000
-    lr = 1e-3
+    sign_batch = 10000
+    features1 = 28
+    features2 = 28
+    features3 = 20
+    window = 5
     weight_decay = 5e-5
-    instances = 10
-    epochs = 100
-    learning_batch = 1024
+    instances = 20
 
     # Variable hyperparameters
 
-    features1, features2, features3, window = config["features1"], config["features2"], config["features3"], config["window"]
+    lr, epochs, learning_batch = config["lr"], config["epochs"], config["learning_batch"]
 
     start = time.time()
     intermediate_score = objective(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, window)
@@ -50,13 +44,10 @@ def training_function(config):
     tune.report(mean_loss=intermediate_score)
     print("time+ ", time.time() - start)
 
-sizes = [i for i in range(4,32,4)]
-
 config={
-        "features1": tune.choice(sizes),
-        "features2": tune.choice(sizes),
-        "features3": tune.choice(sizes),
-        "window": tune.choice([3,5])
+        "lr": tune.loguniform(1e-4, 1e-2),
+        "epochs": tune.choice([30, 50, 70, 100, 110, 130]),
+        "learning_batch": tune.choice([128, 256, 512, 1024])
     }
 
 ng_search = NevergradSearch(
@@ -64,9 +55,6 @@ ng_search = NevergradSearch(
     metric="mean_loss",
     mode="min")
 
-#ng_search = ConcurrencyLimiter(ng_search, max_concurrent=2)
-#training_function = DistributedTrainableCreator(training_function, num_workers=2)
-
-nevergradopt = tune.run(training_function, config=config, search_alg=ng_search, num_samples=150, resources_per_trial={"cpu": 20})
+nevergradopt = tune.run(training_function, config=config, search_alg=ng_search, num_samples=200, resources_per_trial={"cpu": 20})
 print("Best config: ", nevergradopt.get_best_config(
     metric="mean_loss", mode="min"))

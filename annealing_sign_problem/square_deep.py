@@ -230,17 +230,26 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, s
         log_psi = make_log_coeff_fn(ground_state.abs() * predict_signs(), basis)
         r, best_energy = optimize_sign_structure(spins, hamiltonian, log_psi, sweep_sa, beta0, beta1, sampled=True)
 
-        break
-
         spins = np.stack([t[0] for t in r])
         if spins.ndim > 1:
             spins = spins[:, 0]
         signs = torch.tensor([t[1] for t in r])
         weights = None
-        # (ground_state.abs() ** 2)[basis.batched_index(spins).view(np.int64)].float()
         tune_neural_network(model, torch.from_numpy(spins.view(np.int64)), signs, weights, epochs, learning_batch, lr, weight_decay)
+
         if i % 5 == 4:
-            print("Energy: ", get_energy(), get_accuracy(), get_overlap())
+            energ = get_energy()
+            print("Energy: ", energ)
+            file = open('energy.txt', 'a')
+            file.write(str(energ)+', ')
+            file.close()
+
+
+        overl = get_overlap()
+        print("Overlap: ", overl)
+        file = open('overlap.txt', 'a')
+        file.write(str(overl)+', ')
+        file.close()
 
     return 1 - np.abs(get_overlap()), best_energy
 
@@ -287,43 +296,37 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
 
     ground_state, E, representatives = _load_ground_state(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.h5"
-        os.path.join(project_dir(), "data/nonsym/j1j2_square_4x6_nonsym.h5")
+        os.path.join(project_dir(), "data/maximal/j1j2_square_4x6_nonsym.h5")
         # "/home/tom/src/spin-ed/data/heisenberg_kagome_16.h5"
     )
     basis, hamiltonian = _load_basis_and_hamiltonian(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.yaml"
-        os.path.join(project_dir(), "data/nonsym/j1j2_square_4x6_nonsym.yaml")
+        os.path.join(project_dir(), "data/maximal/j1j2_square_4x6_nonsym.yaml")
         # "/home/tom/src/spin-ed/example/heisenberg_kagome_16.yaml"
     )
     basis.build(representatives)
     representatives = None
-    #print(E)
-      
-#    torch.manual_seed(123)
-#    np.random.seed(127)
 
     torch.manual_seed(123)
     np.random.seed(127)
 
-    model = torch.nn.Sequential(
-        nqs.Unpack(basis.number_spins),
-        torch.nn.Linear(basis.number_spins, 12),
-        torch.nn.ReLU(),
-        torch.nn.Linear(12, 12),
-        torch.nn.ReLU(),
-        torch.nn.Linear(12, 2, bias=False),
-    )
+    #model = torch.nn.Sequential(
+    #    nqs.Unpack(basis.number_spins),
+    #    torch.nn.Linear(basis.number_spins, 12),
+    #    torch.nn.ReLU(),
+    #    torch.nn.Linear(12, 12),
+    #    torch.nn.ReLU(),
+    #    torch.nn.Linear(12, 2, bias=False),
+    #)
 
-    #model = Net((4, 6), features1, features2, features3, window)
+    model = Net((4, 6), features1, features2, features3, window)
 
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print("Parameters in total", pytorch_total_params)
 
-    #sys.exit()
-
     loss, best_energy = find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch)
     print("loss = ", loss, "Ising energy = ", best_energy)
-    return loss, best_energy
+    return loss
 
 if __name__ == "__main__":
     main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, window)
