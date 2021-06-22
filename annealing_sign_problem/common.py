@@ -6,6 +6,8 @@ import numpy as np
 import scipy.sparse
 from loguru import logger
 from ctypes import CDLL, POINTER, c_int64, c_uint32, c_uint64, c_double
+import yaml
+import h5py
 import os
 
 
@@ -82,6 +84,7 @@ __preprocess_library()
 #     )
 #     return out_spins, out_coeffs, out_counts
 
+
 def split_into_batches(xs: Tensor, batch_size: int, device=None):
     r"""Iterate over `xs` in batches of size `batch_size`. If `device` is not `None`, batches are
     moved to `device`.
@@ -151,10 +154,11 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     spins, counts = np.unique(spins, return_counts=True, axis=0)
     if not sampled and np.any(counts != 1):
         raise ValueError("'spins' contains duplicate spin configurations, but sampled=False")
-    logger.info("{}", spins.shape)
 
     @torch.no_grad()
     def forward(x):
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x.view(np.int64))
         r = forward_with_batches(log_ψ, x, batch_size=10240)
         if r.numel() > 1:
             r.squeeze_(dim=1)
@@ -162,7 +166,6 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
 
     ψs = forward(spins)
     other_spins, other_coeffs, other_counts = hamiltonian.batched_apply(spins)
-    logger.info(other_counts)
     assert np.all(other_counts > 0)
     if not np.allclose(other_coeffs.imag, 0):
         raise ValueError("expected all matrix elements to be real")
@@ -172,13 +175,13 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     scale = np.max(other_ψs.real)
     other_ψs.real -= scale
     other_ψs = np.exp(other_ψs, dtype=np.complex128)
-    if not np.allclose(other_ψs.imag, 0):
+    if not np.allclose(other_ψs.imag, 0, atol=1e-6):
         raise ValueError("expected all wavefunction coefficients to be real")
     other_ψs = np.ascontiguousarray(other_ψs.real)
 
     ψs.real -= scale
     ψs = np.exp(ψs, dtype=np.complex128)
-    if not np.allclose(ψs.imag, 0):
+    if not np.allclose(ψs.imag, 0, atol=1e-6):
         raise ValueError("expected all wavefunction coefficients to be real")
     ψs = np.ascontiguousarray(ψs.real)
 
@@ -237,10 +240,31 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         x0.ctypes.data_as(POINTER(c_uint64)),
     )
 
-    logger.info("Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
-                written, np.abs(matrix.data).min(), np.abs(matrix.data).max())
+    logger.info(
+        "Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
+        written,
+        np.abs(matrix.data).min(),
+        np.abs(matrix.data).max(),
+    )
 
-    return h, spins, x0
+    return h, spins, x0, counts
+
+
+def load_ground_state(filename: str):
+    with h5py.File(filename, "r") as f:
+        ground_state = f["/hamiltonian/eigenvectors"][:]
+        ground_state = ground_state.squeeze()
+        energy = f["/hamiltonian/eigenvalues"][0]
+        basis_representatives = f["/basis/representatives"][:]
+    return torch.from_numpy(ground_state), energy, basis_representatives
+
+
+def load_basis_and_hamiltonian(filename: str):
+    with open(filename, "r") as f:
+        config = yaml.load(f, Loader=yaml.SafeLoader)
+    basis = ls.SpinBasis.load_from_yaml(config["basis"])
+    hamiltonian = ls.Operator.load_from_yaml(config["hamiltonian"], basis)
+    return basis, hamiltonian
 
 
 def make_log_coeff_fn(ground_state: np.ndarray, basis):
