@@ -1,12 +1,19 @@
 import lattice_symmetries as ls
 import ising_glass_annealer as sa
+import torch
+from torch import Tensor
 import numpy as np
 import scipy.sparse
 from loguru import logger
 from ctypes import CDLL, POINTER, c_int64, c_uint32, c_uint64, c_double
 import os
 
-_lib = CDLL(os.path.join(os.path.dirname(os.path.realpath(__file__)), "libbuild_matrix.so"))
+
+def project_dir():
+    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+_lib = CDLL(os.path.join(project_dir(), "annealing_sign_problem", "libbuild_matrix.so"))
 
 
 def __preprocess_library():
@@ -27,56 +34,109 @@ def __preprocess_library():
 __preprocess_library()
 
 
-def _int_to_ls_bits512(x: int, n: int = 8) -> np.ndarray:
-    assert n > 0
-    if n == 1:
-        return x
-    x = int(x)
-    bits = np.empty(n, dtype=np.uint64)
-    for i in range(n):
-        bits[i] = x & 0xFFFFFFFFFFFFFFFF
-        x >>= 64
-    return bits
+# def _int_to_ls_bits512(x: int, n: int = 8) -> np.ndarray:
+#     assert n > 0
+#     if n == 1:
+#         return x
+#     x = int(x)
+#     bits = np.empty(n, dtype=np.uint64)
+#     for i in range(n):
+#         bits[i] = x & 0xFFFFFFFFFFFFFFFF
+#         x >>= 64
+#     return bits
 
 
-def _ls_bits512_to_int(bits) -> int:
-    n = len(bits)
+# def _ls_bits512_to_int(bits) -> int:
+#     n = len(bits)
+#     if n == 0:
+#         return 0
+#     x = int(bits[n - 1])
+#     for i in range(n - 2, -1, -1):
+#         x <<= 64
+#         x |= int(bits[i])
+#     return x
+
+
+# def batched_apply(spins, hamiltonian):
+#     spins = np.asarray(spins, dtype=np.uint64, order="C")
+#     if spins.ndim < 2:
+#         spins = spins.reshape(-1, 1)
+#     out_spins = []
+#     out_coeffs = []
+#     out_counts = []
+#     for σ in spins:
+#         out_counts.append(0)
+#         for (other_σ, coeff) in zip(*hamiltonian.apply(_ls_bits512_to_int(σ))):
+#             assert coeff.imag == 0
+#             out_spins.append(other_σ)
+#             out_coeffs.append(coeff.real)
+#             out_counts[-1] += 1
+#     out_spins = np.stack(out_spins)
+#     out_coeffs = np.asarray(out_coeffs, dtype=np.float64)
+#     out_counts = np.asarray(out_counts, dtype=np.int64)
+#     logger.debug(
+#         "max_buffer_size = {}, used = {}, max = {}",
+#         hamiltonian.max_buffer_size,
+#         out_spins.shape[0] / spins.shape[0],
+#         max(out_counts),
+#     )
+#     return out_spins, out_coeffs, out_counts
+
+def split_into_batches(xs: Tensor, batch_size: int, device=None):
+    r"""Iterate over `xs` in batches of size `batch_size`. If `device` is not `None`, batches are
+    moved to `device`.
+    """
+    batch_size = int(batch_size)
+    if batch_size <= 0:
+        raise ValueError("invalid batch_size: {}; expected a positive integer".format(batch_size))
+
+    expanded = False
+    if isinstance(xs, (np.ndarray, Tensor)):
+        xs = (xs,)
+        expanded = True
+    else:
+        assert isinstance(xs, (tuple, list))
+    n = xs[0].shape[0]
+    if any(filter(lambda x: x.shape[0] != n, xs)):
+        raise ValueError("tensors 'xs' must all have the same batch dimension")
     if n == 0:
-        return 0
-    x = int(bits[n - 1])
-    for i in range(n - 2, -1, -1):
-        x <<= 64
-        x |= int(bits[i])
-    return x
+        return None
+
+    i = 0
+    while i + batch_size <= n:
+        chunks = tuple(x[i : i + batch_size] for x in xs)
+        if device is not None:
+            chunks = tuple(chunk.to(device) for chunk in chunks)
+        if expanded:
+            chunks = chunks[0]
+        yield chunks
+        i += batch_size
+    if i != n:  # Remaining part
+        chunks = tuple(x[i:] for x in xs)
+        if device is not None:
+            chunks = tuple(chunk.to(device) for chunk in chunks)
+        if expanded:
+            chunks = chunks[0]
+        yield chunks
 
 
-def batched_apply(spins, hamiltonian):
-    spins = np.asarray(spins, dtype=np.uint64, order="C")
-    if spins.ndim < 2:
-        spins = spins.reshape(-1, 1)
-    out_spins = []
-    out_coeffs = []
-    out_counts = []
-    for σ in spins:
-        out_counts.append(0)
-        for (other_σ, coeff) in zip(*hamiltonian.apply(_ls_bits512_to_int(σ))):
-            assert coeff.imag == 0
-            out_spins.append(other_σ)
-            out_coeffs.append(coeff.real)
-            out_counts[-1] += 1
-    out_spins = np.stack(out_spins)
-    out_coeffs = np.asarray(out_coeffs, dtype=np.float64)
-    out_counts = np.asarray(out_counts, dtype=np.int64)
-    logger.debug(
-        "max_buffer_size = {}, used = {}, max = {}",
-        hamiltonian.max_buffer_size,
-        out_spins.shape[0] / spins.shape[0],
-        max(out_counts),
-    )
-    return out_spins, out_coeffs, out_counts
+def forward_with_batches(f, xs, batch_size: int, device=None) -> Tensor:
+    r"""Applies ``f`` to all ``xs`` propagating no more than ``batch_size``
+    samples at a time. ``xs`` is split into batches along the first dimension
+    (i.e. dim=0). ``f`` must return a torch.Tensor.
+    """
+    if xs.shape[0] == 0:
+        raise ValueError("invalid xs: {}; input should not be empty".format(xs))
+    out = []
+    for chunk in split_into_batches(xs, batch_size, device):
+        out.append(f(chunk))
+    return torch.cat(out, dim=0)
 
 
 def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = False):
+    r"""Map quantum Hamiltonian to classical ising model where wavefunction coefficients are now
+    considered spin degrees of freedom.
+    """
     logger.info("Constructing classical Ising model...")
     spins = np.asarray(spins, dtype=np.uint64, order="C")
     if spins.ndim == 1:
@@ -87,28 +147,45 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         spins = np.ascontiguousarray(spins)
     else:
         raise ValueError("'x' has wrong shape: {}; expected a 2D array".format(x.shape))
+    # If spins come from Monte Carlo sampling, it might contains duplicates.
     spins, counts = np.unique(spins, return_counts=True, axis=0)
-    if not sampled:
-        assert np.all(counts == 1)
-    ψs = log_ψ(spins).numpy().squeeze(axis=1)
+    if not sampled and np.any(counts != 1):
+        raise ValueError("'spins' contains duplicate spin configurations, but sampled=False")
+    logger.info("{}", spins.shape)
 
+    @torch.no_grad()
+    def forward(x):
+        r = forward_with_batches(log_ψ, x, batch_size=10240)
+        if r.numel() > 1:
+            r.squeeze_(dim=1)
+        return r.numpy()
+
+    ψs = forward(spins)
     other_spins, other_coeffs, other_counts = hamiltonian.batched_apply(spins)
-    assert np.allclose(other_coeffs.imag, 0)
+    logger.info(other_counts)
+    assert np.all(other_counts > 0)
+    if not np.allclose(other_coeffs.imag, 0):
+        raise ValueError("expected all matrix elements to be real")
     other_coeffs = np.ascontiguousarray(other_coeffs.real)
-    other_ψs = log_ψ(other_spins).numpy().squeeze(axis=1)
+    other_ψs = forward(other_spins)
 
     scale = np.max(other_ψs.real)
     other_ψs.real -= scale
     other_ψs = np.exp(other_ψs, dtype=np.complex128)
-    assert np.allclose(other_ψs.imag, 0)
+    if not np.allclose(other_ψs.imag, 0):
+        raise ValueError("expected all wavefunction coefficients to be real")
     other_ψs = np.ascontiguousarray(other_ψs.real)
+
     ψs.real -= scale
     ψs = np.exp(ψs, dtype=np.complex128)
-    assert np.allclose(ψs.imag, 0)
+    if not np.allclose(ψs.imag, 0):
+        raise ValueError("expected all wavefunction coefficients to be real")
     ψs = np.ascontiguousarray(ψs.real)
 
     if sampled:
         normalization = 1 / np.sqrt(np.sum(counts))
+        # In case spins were sampled from |ψ|², we divide ψs by the probability to obtain local
+        # estimators
         ψs = 1 / ψs
     else:
         normalization = 1 / np.linalg.norm(ψs)
@@ -141,9 +218,11 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         (elements, (row_indices, col_indices)),
         shape=(spins.shape[0], spins.shape[0]),
     )
-    matrix = matrix.tocsr()
-    matrix = 0.5 * (matrix + matrix.T)
-    matrix = matrix.tocoo()
+    # Symmetrize the matrix if spins come from Monte Carlo sampling
+    if sampled:
+        matrix = matrix.tocsr()
+        matrix = 0.5 * (matrix + matrix.T)
+        matrix = matrix.tocoo()
     h = sa.Hamiltonian(matrix, field)
 
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
@@ -155,6 +234,28 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
     logger.info("Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
                 written, np.abs(matrix.data).min(), np.abs(matrix.data).max())
     return h, spins, x0
+
+
+def make_log_coeff_fn(ground_state: np.ndarray, basis):
+    log_amplitudes = ground_state.abs().log_().unsqueeze(dim=1)
+    phases = torch.where(
+        ground_state >= 0,
+        torch.scalar_tensor(0.0, dtype=ground_state.dtype),
+        torch.scalar_tensor(np.pi, dtype=ground_state.dtype),
+    ).unsqueeze(dim=1)
+
+    @torch.no_grad()
+    def log_coeff_fn(spin: Tensor) -> Tensor:
+        if not isinstance(spin, np.ndarray):
+            spin = spin.numpy().view(np.uint64)
+        if spin.ndim > 1:
+            spin = spin[:, 0]
+        indices = torch.from_numpy(ls.batched_index(basis, spin).view(np.int64))
+        a = log_amplitudes[indices]
+        b = phases[indices]
+        return torch.complex(a, b)
+
+    return log_coeff_fn
 
 
 # def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = False):
