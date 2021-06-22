@@ -6,6 +6,8 @@ import torch
 from torch import Tensor
 import time
 from loguru import logger
+import sys
+import numpy as np
 
 def project_dir():
     return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -165,18 +167,25 @@ def tune_neural_network(
     logger.debug("Finally  : loss = {}, accuracy = {}", info["loss"], info["accuracy"])
 
 
-def optimize_sign_structure(spins, hamiltonian, log_psi, number_sweeps=10000, beta0=10, beta1=10000, sampled=False):
+def optimize_sign_structure(spins, hamiltonian, log_psi, number_sweeps, beta0, beta1, sampled=False):
     # extract_classical_ising_model(spins, hamiltonian, log_psi, sampled=sampled)
     ising_hamiltonian, spins, x0 = extract_classical_ising_model(
         spins, hamiltonian, log_psi, sampled=sampled
     )
+
+    #print("Hamiltonian ", np.abs(matrix).data.max(), np.abs(matrix).data.min())
+
     #configuration, _, best_energy = sa.anneal(
     #    ising_hamiltonian, x0, number_sweeps=10000, beta0=10, beta1=10000
     #)
-    configuration, _, best_energy = sa.anneal(
-        ising_hamiltonian, x0, number_sweeps, beta0, beta1
+    configuration, current_energy, best_energy = sa.anneal(
+        ising_hamiltonian, x0, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
     )
-    # print(best_energy[0], best_energy[-1])
+
+    np.savetxt('best.out', best_energy)
+    np.savetxt('current.out', current_energy)
+
+    print(best_energy[0], best_energy[-1])
     i = np.arange(spins.shape[0], dtype=np.uint64)
     signs = 2 * ((configuration[i // 64] >> (i % 64)) & 1).astype(np.float64) - 1
     r = list(zip(spins, signs))
@@ -185,10 +194,12 @@ def optimize_sign_structure(spins, hamiltonian, log_psi, number_sweeps=10000, be
     #     sign = (int(configuration[i // 64]) >> (i % 64)) & 1
     #     sign = 2 * int(sign) - 1
     #     r.append((spins[i], sign))
-    return r
+
+    #return r
+    return r, best_energy[-1]
 
 
-def find_sign_structure_neural(model, ground_state, hamiltonian, beta0=10, beta1=10000, sweep_sa=10000, sign_batch=40960, lr=1e-3, weight_decay=5e-5, instances=100, epochs=100, learning_batch=32):
+def find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr=1e-3, weight_decay=5e-5, instances=100, epochs=100, learning_batch=32):
 
     basis = hamiltonian.basis
     all_spins = torch.from_numpy(basis.states.view(np.int64))
@@ -207,7 +218,7 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0=10, beta1
     get_accuracy = lambda: (correct_sign_structure == predict_signs()).float().mean().item()
     get_overlap = lambda: torch.dot(ground_state, ground_state.abs() * predict_signs()).item()
     # print("Ground state energy: ", hamiltonian.expectation(ground_state.numpy()).real)
-    print("Initially: ", get_energy(), get_accuracy(), get_overlap())
+    #print("Initially: ", get_energy(), get_accuracy(), get_overlap())
     p = ground_state.abs() ** 2
 
     for i in range(instances):
@@ -217,18 +228,30 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0=10, beta1
 
         spins = basis.states[batch_indices]
         log_psi = make_log_coeff_fn(ground_state.abs() * predict_signs(), basis)
-        r = optimize_sign_structure(spins, hamiltonian, log_psi, sweep_sa, beta0, beta1, sampled=True)
+        r, best_energy = optimize_sign_structure(spins, hamiltonian, log_psi, sweep_sa, beta0, beta1, sampled=True)
+
         spins = np.stack([t[0] for t in r])
         if spins.ndim > 1:
             spins = spins[:, 0]
         signs = torch.tensor([t[1] for t in r])
         weights = None
-        # (ground_state.abs() ** 2)[basis.batched_index(spins).view(np.int64)].float()
         tune_neural_network(model, torch.from_numpy(spins.view(np.int64)), signs, weights, epochs, learning_batch, lr, weight_decay)
-        #if i % 5 == 4:
-        #    print("Energy: ", get_energy(), get_accuracy(), get_overlap())
 
-    return 1 - np.abs(get_overlap())
+        if i % 5 == 4:
+            energ = get_energy()
+            print("Energy: ", energ)
+            file = open('energy.txt', 'a')
+            file.write(str(energ)+', ')
+            file.close()
+
+
+        overl = get_overlap()
+        print("Overlap: ", overl)
+        file = open('overlap.txt', 'a')
+        file.write(str(overl)+', ')
+        file.close()
+
+    return 1 - np.abs(get_overlap()), best_energy
 
 def pad_circular(x, pad):
     x = torch.cat([x, x[:, :, 0:pad, :]], dim=2)
@@ -239,16 +262,17 @@ def pad_circular(x, pad):
 
 class Net(torch.nn.Module):   
 
-    def __init__(self, shape: Tuple[int, int], features1: int, features2: int, window: int):
+    def __init__(self, shape: Tuple[int, int], features1: int, features2: int, features3: int, window: int):
         super().__init__()
         self._shape = shape
         self._conv1 = torch.nn.Conv2d(1, features1, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
         self._conv2 = torch.nn.Conv2d(features1, features2, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
-        #self._conv3 = torch.nn.Conv2d(64, 128, 5, stride=1, padding = 0, dilation=1, groups=1, bias=True)
-        self._dense6 = torch.nn.Linear(features2, 2, bias=True)
-        self.dropout = torch.nn.Dropout(0.3)
+        self._conv3 = torch.nn.Conv2d(features2, features3, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._dense6 = torch.nn.Linear(features3, 2, bias=True)
+        #self.dropout = torch.nn.Dropout(0.3)
         self._padding = window//2
         self._features2 = features2
+        self._features3 = features3
 #    @torch.jit.script_method
     def forward(self, x):
         x = nqs.unpack(x, self._shape[0]*self._shape[1])
@@ -259,53 +283,50 @@ class Net(torch.nn.Module):
         x = pad_circular(x, self._padding)
         x = self._conv2(x)
         x = torch.nn.functional.relu(x)
-        #x = pad_circular(x, 1)
-        #x = self._conv3(x)
-        #x = torch.nn.functional.relu(x)
-        x = x.view(x.shape[0], self._features2, -1)
+        x = pad_circular(x, self._padding)
+        x = self._conv3(x)
+        x = torch.nn.functional.relu(x)
+        x = x.view(x.shape[0], self._features3, -1)
         x = x.mean(dim = 2)
         x = self._dense6(x)
         return x
 
 
-def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, window):
+def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, window):
 
     ground_state, E, representatives = _load_ground_state(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.h5"
-        os.path.join(project_dir(), "data/nonsym/j1j2_square_4x6_nonsym.h5")
+        os.path.join(project_dir(), "data/maximal/j1j2_square_4x6_nonsym.h5")
         # "/home/tom/src/spin-ed/data/heisenberg_kagome_16.h5"
     )
     basis, hamiltonian = _load_basis_and_hamiltonian(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.yaml"
-        os.path.join(project_dir(), "data/nonsym/j1j2_square_4x6_nonsym.yaml")
+        os.path.join(project_dir(), "data/maximal/j1j2_square_4x6_nonsym.yaml")
         # "/home/tom/src/spin-ed/example/heisenberg_kagome_16.yaml"
     )
     basis.build(representatives)
     representatives = None
-    #print(E)
-      
+
     torch.manual_seed(123)
     np.random.seed(127)
 
     #model = torch.nn.Sequential(
     #    nqs.Unpack(basis.number_spins),
-    #    torch.nn.Linear(basis.number_spins, 128),
+    #    torch.nn.Linear(basis.number_spins, 12),
     #    torch.nn.ReLU(),
-    #    torch.nn.Linear(128, 128),
+    #    torch.nn.Linear(12, 12),
     #    torch.nn.ReLU(),
-    #    torch.nn.Linear(128, 2, bias=False),
+    #    torch.nn.Linear(12, 2, bias=False),
     #)
 
-    model = Net((4, 6), features1, features2, window)
+    model = Net((4, 6), features1, features2, features3, window)
 
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print("Parameters in total", pytorch_total_params)
 
-    #sys.exit()
-
-    loss = find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch)
-    print("loss = ", loss)
+    loss, best_energy = find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch)
+    print("loss = ", loss, "Ising energy = ", best_energy)
     return loss
 
 if __name__ == "__main__":
-    main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, window)
+    main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, window)

@@ -1,18 +1,20 @@
-name: annealing_sign_problem
+name: annealing
 channels:
-  - conda-forge
   - pytorch
   - twesterhout
+  - conda-forge
 dependencies:
   - python
   - pip
+  - torchvision
   - pip:
     - black
       # - grip
     - loguru
     - neovim
   # - cpuonly
-  - nqs-playground
+  - nqs-playground=1.1.0
+  - pytorch=1.8.1
   - lattice-symmetries
   - ising-glass-annealer
   - h5py

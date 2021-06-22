@@ -225,14 +225,21 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         matrix = matrix.tocoo()
     h = sa.Hamiltonian(matrix, field)
 
+    print("Max field", field.max(), np.abs(field).max())
+    print("Min field", field.min(), np.abs(field).min())
+    print("Max coupling", matrix.data.max(), np.abs(matrix.data).max())
+    print("Min coupling", matrix.data.min(), np.abs(matrix.data).min())
+
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
     _lib.extract_signs(
         spins.shape[0],
         ψs.ctypes.data_as(POINTER(c_double)),
         x0.ctypes.data_as(POINTER(c_uint64)),
     )
+
     logger.info("Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
                 written, np.abs(matrix.data).min(), np.abs(matrix.data).max())
+
     return h, spins, x0
 
 
