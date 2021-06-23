@@ -227,6 +227,7 @@ def find_ground_state(config):
     dtype = _get_dtype(config.model)
     device = _get_device(config.model)
     for i in range(config.number_outer_iterations):
+        logger.info("Starting outer iteration {}...", i + 1)
         if sampled:
             batch_indices = np.random.choice(
                 basis.number_states, size=config.number_monte_carlo_samples, replace=True, p=p
