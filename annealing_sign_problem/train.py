@@ -1,4 +1,5 @@
 from .common import *
+import ctypes
 from collections import namedtuple
 from typing import Tuple
 import lattice_symmetries as ls
@@ -90,11 +91,11 @@ def prepare_datasets(
 ):
     spins = spins.to(device)
     target_signs = target_signs.to(device)
-    target_signs = torch.where(
-        target_signs > 0,
-        torch.scalar_tensor(0, dtype=torch.int64, device=device),
-        torch.scalar_tensor(1, dtype=torch.int64, device=device),
-    )
+    # target_signs = torch.where(
+    #     target_signs > 0,
+    #     torch.scalar_tensor(0, dtype=torch.int64, device=device),
+    #     torch.scalar_tensor(1, dtype=torch.int64, device=device),
+    # )
     if weights is None:
         weights = torch.ones_like(target_signs, device=device, dtype=dtype)
     data = (spins, target_signs, weights)
@@ -119,6 +120,7 @@ def tune_neural_network(
     train_dataset, test_dataset = prepare_datasets(
         spins, target_signs, weights, train_batch_size=batch_size, device=device, dtype=dtype
     )
+    logger.info("Training dataset contains {} samples", spins.size(0))
 
     def loss_fn(ŷ, y, w):
         """Weighted Cross Entropy"""
@@ -155,11 +157,16 @@ def tune_sign_structure(
     h, spins, x0, counts = extract_classical_ising_model(
         spins, hamiltonian, log_psi, sampled=sampled
     )
+    beta0 = 6.0
     x, _, _ = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
-    _, _, _ = sa.anneal(h, x0, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
+    # x2, _, e2 = sa.anneal(h, ~x0, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
+    # logger.info("{} vs. {}, {} vs. {}", e1[-1], e2[-1], x0 & x1, x0 & x2)
+    # x = x1
+    # _, _, _ = sa.anneal(h, x, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
+    # _, _, _ = sa.anneal(h, ~x, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     i = np.arange(spins.shape[0], dtype=np.uint64)
     signs = (x[i // 64] >> (i % 64)) & 1
-    # signs = 1 - signs
+    signs = 1 - signs
     signs = torch.from_numpy(signs.view(np.int64))
     return spins, signs, counts
 
@@ -256,6 +263,53 @@ def find_ground_state(config):
     # return 1 - np.abs(get_overlap()), best_energy
 
 
+class ConvBlock(torch.nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3):
+        super().__init__()
+        self.layer = torch.nn.Sequential(
+            torch.nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=kernel_size,
+                padding=0,
+            ),
+            torch.nn.ReLU(inplace=True),
+            # torch.nn.MaxPool1d(kernel_size=2),
+        )
+        self.kernel_size = kernel_size
+
+    def forward(self, x):
+        k = self.kernel_size
+        x = torch.cat([x[:, :, -k // 2 :, :], x, x[:, :, : k // 2, :]], dim=2)
+        x = torch.cat([x[:, :, :, -k // 2 :], x, x[:, :, :, : k // 2]], dim=3)
+        return self.layer(x)
+
+
+class Phase(torch.nn.Module):
+    def __init__(self, shape, number_blocks=3, number_channels=8, kernel_size=3):
+        super().__init__()
+        layers = [ConvBlock(in_channels=1, out_channels=number_channels, kernel_size=kernel_size)]
+        for i in range(number_blocks - 1):
+            layers.append(
+                ConvBlock(
+                    in_channels=number_channels,
+                    out_channels=number_channels,
+                    kernel_size=kernel_size,
+                )
+            )
+        self.shape = shape
+        self.layers = torch.nn.Sequential(*layers)
+        self.tail = torch.nn.Linear(number_channels, 2, bias=False)
+
+    def forward(self, x):
+        number_spins = self.shape[0] * self.shape[1]
+        x = nqs.unpack(x, number_spins)
+        x = x.view(x.size(0), 1, *self.shape)
+        x = self.layers(x)
+        x = x.view(*x.size()[:2], -1).sum(dim=2)
+        return self.tail(x)
+
+
 def main():
     ground_state, E, representatives = load_ground_state(
         os.path.join(project_dir(), "data/symm/j1j2_square_4x6.h5")
@@ -266,28 +320,30 @@ def main():
     basis.build(representatives)
     representatives = None
 
-    torch.manual_seed(123)
-    np.random.seed(127)
+    torch.manual_seed(124)
+    np.random.seed(128)
 
-    model = torch.nn.Sequential(
-        nqs.Unpack(basis.number_spins),
-        torch.nn.Linear(basis.number_spins, 64),
-        torch.nn.ReLU(),
-        torch.nn.Linear(64, 64),
-        torch.nn.ReLU(),
-        torch.nn.Linear(64, 2, bias=False),
-    )
+    model = Phase((4, 6), number_blocks=6, number_channels=28, kernel_size=5)
+    # model = torch.nn.Sequential(
+    #     nqs.Unpack(basis.number_spins),
+    #     torch.nn.Linear(basis.number_spins, 64),
+    #     torch.nn.ReLU(),
+    #     torch.nn.Linear(64, 64),
+    #     torch.nn.ReLU(),
+    #     torch.nn.Linear(64, 2, bias=False),
+    # )
 
+    optimizer = torch.optim.Adam(model.parameters(), lr=1.5e-4)
     config = Config(
         model=model,
         ground_state=ground_state,
         hamiltonian=hamiltonian,
         number_sa_sweeps=10000,
-        number_supervised_epochs=20,
-        number_monte_carlo_samples=10000,
-        number_outer_iterations=30,
-        train_batch_size=64,
-        optimizer=lambda m: torch.optim.Adam(m.parameters(), lr=1e-3),
+        number_supervised_epochs=50,
+        number_monte_carlo_samples=20000,
+        number_outer_iterations=100,
+        train_batch_size=256,
+        optimizer=lambda m: optimizer,
         scheduler=lambda m: None,
         device=torch.device("cpu"),
     )
