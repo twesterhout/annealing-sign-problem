@@ -152,10 +152,10 @@ def tune_sign_structure(
     seed: Optional[int] = None,
     beta0: Optional[int] = None,
     beta1: Optional[int] = None,
-    sampled: bool = False,
+    sampled_power: Optional[int] = None,
 ):
     h, spins, x0, counts = extract_classical_ising_model(
-        spins, hamiltonian, log_psi, sampled=sampled
+        spins, hamiltonian, log_psi, sampled_power=sampled_power
     )
     beta0 = 6.0
     x, _, _ = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
@@ -222,13 +222,16 @@ def find_ground_state(config):
     # )
 
     log_psi = _make_log_coeff_fn(config.ground_state.abs(), config.model, basis)
-    p = config.ground_state.abs() ** 2
-    sampled = True
+    sampled_power = 1 # True
+    with torch.no_grad():
+        p = config.ground_state.abs() ** sampled_power
+        p = p.numpy()
+        p /= np.sum(p)
     dtype = _get_dtype(config.model)
     device = _get_device(config.model)
     for i in range(config.number_outer_iterations):
         logger.info("Starting outer iteration {}...", i + 1)
-        if sampled:
+        if sampled_power is not None:
             batch_indices = np.random.choice(
                 basis.number_states, size=config.number_monte_carlo_samples, replace=True, p=p
             )
@@ -239,10 +242,11 @@ def find_ground_state(config):
 
         spins = basis.states[batch_indices]
         spins, signs, counts = tune_sign_structure(
-            spins, hamiltonian, log_psi, number_sweeps=config.number_sa_sweeps, sampled=sampled
+            spins, hamiltonian, log_psi, number_sweeps=config.number_sa_sweeps,
+            sampled_power=sampled_power
         )
         with torch.no_grad():
-            if sampled:
+            if sampled_power is not None:
                 weights = torch.from_numpy(counts).to(dtype=dtype, device=device)
                 weights /= torch.sum(weights)
             else:
@@ -264,6 +268,13 @@ def find_ground_state(config):
     # return 1 - np.abs(get_overlap()), best_energy
 
 
+class Mish(torch.nn.Module):
+    def __init__(self):
+        super(Mish, self).__init__()
+
+    def forward(self, input: Tensor) -> Tensor:
+        return input * torch.tanh(torch.nn.functional.softplus(input))
+
 class ConvBlock(torch.nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3):
         super().__init__()
@@ -274,7 +285,7 @@ class ConvBlock(torch.nn.Module):
                 kernel_size=kernel_size,
                 padding=0,
             ),
-            torch.nn.ReLU(inplace=True),
+            Mish(),
             # torch.nn.MaxPool1d(kernel_size=2),
         )
         self.kernel_size = kernel_size
@@ -324,7 +335,7 @@ def main():
     torch.manual_seed(124)
     np.random.seed(128)
 
-    model = Phase((4, 6), number_blocks=6, number_channels=28, kernel_size=5)
+    model = Phase((4, 6), number_blocks=3, number_channels=28, kernel_size=5)
     # model = torch.nn.Sequential(
     #     nqs.Unpack(basis.number_spins),
     #     torch.nn.Linear(basis.number_spins, 64),
@@ -334,7 +345,7 @@ def main():
     #     torch.nn.Linear(64, 2, bias=False),
     # )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1.5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
     config = Config(
         model=model,
         ground_state=ground_state,

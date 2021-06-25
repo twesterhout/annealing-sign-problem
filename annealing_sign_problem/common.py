@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 import numpy as np
 import scipy.sparse
+from typing import Optional
 from loguru import logger
 from ctypes import CDLL, POINTER, c_int64, c_uint32, c_uint64, c_double
 import yaml
@@ -136,7 +137,7 @@ def forward_with_batches(f, xs, batch_size: int, device=None) -> Tensor:
     return torch.cat(out, dim=0)
 
 
-def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = False):
+def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled_power: Optional[int] = None):
     r"""Map quantum Hamiltonian to classical ising model where wavefunction coefficients are now
     considered spin degrees of freedom.
     """
@@ -152,8 +153,8 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         raise ValueError("'x' has wrong shape: {}; expected a 2D array".format(x.shape))
     # If spins come from Monte Carlo sampling, it might contains duplicates.
     spins, counts = np.unique(spins, return_counts=True, axis=0)
-    if not sampled and np.any(counts != 1):
-        raise ValueError("'spins' contains duplicate spin configurations, but sampled=False")
+    if sampled_power is None and np.any(counts != 1):
+        raise ValueError("'spins' contains duplicate spin configurations, but sampled_power=None")
 
     @torch.no_grad()
     def forward(x):
@@ -185,13 +186,11 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         raise ValueError("expected all wavefunction coefficients to be real")
     ψs = np.ascontiguousarray(ψs.real)
 
-    if sampled:
-        normalization = 1 / np.sqrt(np.sum(counts))
-        # In case spins were sampled from |ψ|², we divide ψs by the probability to obtain local
-        # estimators
-        ψs = 1 / ψs
-    else:
+    if sampled_power is None:
         normalization = 1 / np.linalg.norm(ψs)
+    else:
+        normalization = 1 / np.sqrt(np.dot(counts, np.abs(ψs) ** (2 - sampled_power)))
+        ψs = np.sign(ψs) * np.abs(ψs) ** (1 - sampled_power)
     ψs *= normalization
     other_ψs *= normalization
 
@@ -222,16 +221,16 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = Fa
         shape=(spins.shape[0], spins.shape[0]),
     )
     # Symmetrize the matrix if spins come from Monte Carlo sampling
-    if sampled:
+    if sampled_power is not None:
         matrix = matrix.tocsr()
         matrix = 0.5 * (matrix + matrix.T)
         matrix = matrix.tocoo()
     h = sa.Hamiltonian(matrix, field)
 
-    print("Max field", field.max(), np.abs(field).max())
-    print("Min field", field.min(), np.abs(field).min())
-    print("Max coupling", matrix.data.max(), np.abs(matrix.data).max())
-    print("Min coupling", matrix.data.min(), np.abs(matrix.data).min())
+    # print("Max field", field.max(), np.abs(field).max())
+    # print("Min field", field.min(), np.abs(field).min())
+    # print("Max coupling", matrix.data.max(), np.abs(matrix.data).max())
+    # print("Min coupling", matrix.data.min(), np.abs(matrix.data).min())
 
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
     _lib.extract_signs(
