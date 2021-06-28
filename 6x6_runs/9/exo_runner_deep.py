@@ -16,7 +16,7 @@ def objective(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, e
     return annealing_sign_problem.square_deep.main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs, learning_batch, features1, features2, features3, window)
 
 start = time.time()
-objective(6, 10000, 10000, 20000, 0.000152338, 5e-5, 200, 50, 256, 28, 28, 20, 3)
+objective(6, 10000, 10000, 40000, 0.000152338, 5e-5, 200, 50, 256, 28, 28, 20, 5)
 print("time ", time.time() - start)
 sys.exit()
 
