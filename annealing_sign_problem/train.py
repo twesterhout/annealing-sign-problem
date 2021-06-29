@@ -134,13 +134,6 @@ def tune_neural_network(
 
     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
     logger.debug("[0/{}]: loss = {}, accuracy = {}", epochs, info["loss"], info["accuracy"])
-    # if info["accuracy"] < 0.2:
-    #     target_signs = 1 - target_signs
-    #     train_dataset, test_dataset = prepare_datasets(
-    #         spins, target_signs, weights, train_batch_size=batch_size, device=device, dtype=dtype
-    #     )
-    #     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
-    #     logger.debug("[0/{}]: loss = {}, accuracy = {}", epochs, info["loss"], info["accuracy"])
     for epoch in range(epochs):
         info = supervised_loop_once(train_dataset, model, optimizer, scheduler, loss_fn)
         if epoch < epochs - 1:
@@ -166,7 +159,7 @@ def tune_sign_structure(
         spins, hamiltonian, log_psi, sampled_power=sampled_power, device=device
     )
     beta0 = 6.0 # TODO: Fix me!!
-    beta1 = 10000.0
+    # beta1 = 10000.0
     x, _, _ = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     # x2, _, e2 = sa.anneal(h, ~x0, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     # logger.info("{} vs. {}, {} vs. {}", e1[-1], e2[-1], x0 & x1, x0 & x2)
@@ -231,7 +224,7 @@ def find_ground_state(config):
     # )
 
     log_psi = _make_log_coeff_fn(config.ground_state.abs(), config.model, basis)
-    sampled_power = 2  # True
+    sampled_power = 1.8  # True
     with torch.no_grad():
         p = config.ground_state.abs() ** sampled_power
         p = p.numpy()
@@ -260,8 +253,9 @@ def find_ground_state(config):
         )
         with torch.no_grad():
             if sampled_power is not None:
-                weights = torch.from_numpy(counts).to(dtype=dtype, device=device)
-                weights /= torch.sum(weights)
+                weights = None
+                # weights = torch.from_numpy(counts).to(dtype=dtype, device=device)
+                # weights /= torch.sum(weights)
             else:
                 assert np.all(counts == 1)
                 weights = torch.from_numpy(p[batch_indices]).to(dtype=dtype, device=device)
@@ -299,7 +293,8 @@ class ConvBlock(torch.nn.Module):
                 kernel_size=kernel_size,
                 padding=0,
             ),
-            Mish(),
+            torch.nn.ReLU(),
+            # Mish(),
             # torch.nn.MaxPool1d(kernel_size=2),
         )
         self.kernel_size = kernel_size
@@ -333,8 +328,45 @@ class Phase(torch.nn.Module):
         x = nqs.unpack(x, number_spins)
         x = x.view(x.size(0), 1, *self.shape)
         x = self.layers(x)
-        x = x.view(*x.size()[:2], -1).sum(dim=2)
+        x = x.view(*x.size()[:2], -1).mean(dim=2)
         return self.tail(x)
+
+def pad_circular(x, pad):
+    x = torch.cat([x, x[:, :, 0:pad, :]], dim=2)
+    x = torch.cat([x, x[:, :, :, 0:pad]], dim=3)
+    x = torch.cat([x[:, :, -2 * pad:-pad, :], x], dim=2)
+    x = torch.cat([x[:, :, :, -2 * pad:-pad], x], dim=3)
+    return x
+
+class Net(torch.nn.Module):   
+    def __init__(self, shape: Tuple[int, int], features1: int, features2: int, features3: int, window: int):
+        super().__init__()
+        self._shape = shape
+        self._conv1 = torch.nn.Conv2d(1, features1, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._conv2 = torch.nn.Conv2d(features1, features2, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._conv3 = torch.nn.Conv2d(features2, features3, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._dense6 = torch.nn.Linear(features3, 2, bias=True)
+        #self.dropout = torch.nn.Dropout(0.3)
+        self._padding = window//2
+        self._features2 = features2
+        self._features3 = features3
+#    @torch.jit.script_method
+    def forward(self, x):
+        x = nqs.unpack(x, self._shape[0]*self._shape[1])
+        x = x.view((x.shape[0], 1, *self._shape))
+        x = pad_circular(x, self._padding)
+        x = self._conv1(x)
+        x = torch.nn.functional.relu(x)
+        x = pad_circular(x, self._padding)
+        x = self._conv2(x)
+        x = torch.nn.functional.relu(x)
+        x = pad_circular(x, self._padding)
+        x = self._conv3(x)
+        x = torch.nn.functional.relu(x)
+        x = x.view(x.shape[0], self._features3, -1)
+        x = x.mean(dim = 2)
+        x = self._dense6(x)
+        return x
 
 
 def main():
@@ -346,12 +378,14 @@ def main():
     )
     basis.build(representatives)
     representatives = None
+    logger.info("Hilbert space dimension is {}", basis.number_states)
 
-    torch.manual_seed(123)
+    torch.manual_seed(124)
     np.random.seed(127)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = Phase((6, 6), number_channels=[28, 28, 20], kernel_size=5).to(device)
+    # model = Net((4, 6), 28, 28, 20, window=5) #.to(device)
+    model = Phase((6, 6), number_channels=[32, 32, 32, 32], kernel_size=5).to(device)
     # model = torch.nn.Sequential(
     #     nqs.Unpack(basis.number_spins),
     #     torch.nn.Linear(basis.number_spins, 64),
@@ -359,7 +393,7 @@ def main():
     #     torch.nn.Linear(64, 64),
     #     torch.nn.ReLU(),
     #     torch.nn.Linear(64, 2, bias=False),
-    # )
+    # ).to(device)
 
     # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     config = Config(
@@ -367,12 +401,13 @@ def main():
         ground_state=ground_state,
         hamiltonian=hamiltonian,
         number_sa_sweeps=10000,
-        number_supervised_epochs=50,
-        number_monte_carlo_samples=40000,
-        number_outer_iterations=200,
-        train_batch_size=256,
-        optimizer=lambda m: torch.optim.Adam(model.parameters(), lr=1.5233e-4),
+        number_supervised_epochs=20,
+        number_monte_carlo_samples=80000,
+        number_outer_iterations=300,
+        train_batch_size=32,
+        optimizer=lambda m: torch.optim.Adam(model.parameters(), lr=1.52338e-4, weight_decay=5e-5),
         scheduler=lambda m: None,
         device=device,
     )
     find_ground_state(config)
+    torch.save(model.cpu().state_dict(), "final_model.pt")
