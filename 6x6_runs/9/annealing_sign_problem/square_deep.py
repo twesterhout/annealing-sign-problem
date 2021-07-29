@@ -86,6 +86,7 @@ def supervised_loop_once(dataset, model, optimizer, scheduler, loss_fn, global_i
         w = w / torch.sum(w)
         optimizer.zero_grad()
         ŷ = model(x)
+#        ŷ = nqs.forward_with_batches(model, x, 1000)
         loss = loss_fn(ŷ, y, w)
         loss.backward()
         optimizer.step()
@@ -201,6 +202,8 @@ def optimize_sign_structure(spins, hamiltonian, log_psi, number_sweeps, beta0, b
 
 def find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, sweep_sa, sign_batch, lr=1e-3, weight_decay=5e-5, instances=100, epochs=100, learning_batch=32):
 
+    t1 = time.time()
+
     basis = hamiltonian.basis
     all_spins = torch.from_numpy(basis.states.view(np.int64))
     correct_sign_structure = torch.where(
@@ -210,7 +213,7 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, s
     )
 
     #predict_signs = lambda: 1 - 2 * model(all_spins).argmax(dim=1).float()
-    predict_signs = lambda: 1 - 2 * (nqs.forward_with_batches(model, all_spins, 1000)).argmax(dim=1).float()
+    predict_signs = lambda: 1 - 2 * (nqs.forward_with_batches(model, all_spins, 16384)).argmax(dim=1).float()
 
     get_energy = lambda: hamiltonian.expectation(
         (ground_state.abs() * predict_signs()).numpy()
@@ -221,13 +224,22 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, s
     #print("Initially: ", get_energy(), get_accuracy(), get_overlap())
     p = ground_state.abs() ** 2
 
+    print("Time before start is", time.time() - t1)
+
     for i in range(instances):
         # order = torch.randperm(basis.number_states)
         # batch_indices = order[:1024]
         batch_indices = np.random.choice(basis.number_states, size=sign_batch, replace=True, p=p)
 
         spins = basis.states[batch_indices]
-        log_psi = make_log_coeff_fn(ground_state.abs() * predict_signs(), basis)
+
+        t2 = time.time()
+
+        with torch.no_grad():
+            log_psi = make_log_coeff_fn(ground_state.abs() * predict_signs(), basis)
+
+        print("Computing log_psi takes", time.time() - t2)
+
         r, best_energy = optimize_sign_structure(spins, hamiltonian, log_psi, sweep_sa, beta0, beta1, sampled=True)
 
         spins = np.stack([t[0] for t in r])
@@ -238,19 +250,29 @@ def find_sign_structure_neural(model, ground_state, hamiltonian, beta0, beta1, s
         tune_neural_network(model, torch.from_numpy(spins.view(np.int64)), signs, weights, epochs, learning_batch, lr, weight_decay)
 
         if i % 5 == 4:
-            energ = get_energy()
+
+            t3 = time.time()
+
+            with torch.no_grad():
+                energ = get_energy()
+
             print("Energy: ", energ)
             file = open('energy.txt', 'a')
             file.write(str(energ)+', ')
             file.close()
 
-            overl = get_overlap()
+            with torch.no_grad():
+                overl = get_overlap()
+
             print("Overlap: ", overl)
             file = open('overlap.txt', 'a')
             file.write(str(overl)+', ')
             file.close()
 
+            print("Computing E and O takes", time.time() - t3)
+
     return 1 - np.abs(get_overlap()), best_energy
+
 
 def pad_circular(x, pad):
     x = torch.cat([x, x[:, :, 0:pad, :]], dim=2)
@@ -295,12 +317,12 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
 
     ground_state, E, representatives = _load_ground_state(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.h5"
-        os.path.join(project_dir(), "data/nonsym/j1j2_square_4x6_nonsym.h5")
+        os.path.join(project_dir(), "../../data/6x6_symm/j1j2_square_36.h5")
         # "/home/tom/src/spin-ed/data/heisenberg_kagome_16.h5"
     )
     basis, hamiltonian = _load_basis_and_hamiltonian(
         # "/home/tom/src/annealing-sign-problem/data/j1j2_square_4x4.yaml"
-        os.path.join(project_dir(), "data/nonsym/j1j2_square_4x6_nonsym.yaml")
+        os.path.join(project_dir(), "../../data/6x6_symm/j1j2_square_36.yaml")
         # "/home/tom/src/spin-ed/example/heisenberg_kagome_16.yaml"
     )
     basis.build(representatives)
@@ -318,7 +340,7 @@ def main(beta0, beta1, sweep_sa, sign_batch, lr, weight_decay, instances, epochs
     #    torch.nn.Linear(12, 2, bias=False),
     #)
 
-    model = Net((4, 6), features1, features2, features3, window)
+    model = Net((6, 6), features1, features2, features3, window)
 
     pytorch_total_params = sum(p.numel() for p in model.parameters())
     print("Parameters in total", pytorch_total_params)

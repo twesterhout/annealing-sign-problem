@@ -137,7 +137,13 @@ def forward_with_batches(f, xs, batch_size: int, device=None) -> Tensor:
     return torch.cat(out, dim=0)
 
 
-def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled_power: Optional[int] = None):
+def extract_classical_ising_model(
+    spins,
+    hamiltonian,
+    log_ψ,
+    sampled_power: Optional[int] = None,
+    device: Optional[torch.device] = None,
+):
     r"""Map quantum Hamiltonian to classical ising model where wavefunction coefficients are now
     considered spin degrees of freedom.
     """
@@ -160,10 +166,12 @@ def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled_power: Opt
     def forward(x):
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x.view(np.int64))
+            if device is not None:
+                x = x.to(device)
         r = forward_with_batches(log_ψ, x, batch_size=10240)
         if r.numel() > 1:
             r.squeeze_(dim=1)
-        return r.numpy()
+        return r.cpu().numpy()
 
     ψs = forward(spins)
     other_spins, other_coeffs, other_counts = hamiltonian.batched_apply(spins)

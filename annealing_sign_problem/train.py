@@ -153,11 +153,13 @@ def tune_sign_structure(
     beta0: Optional[int] = None,
     beta1: Optional[int] = None,
     sampled_power: Optional[int] = None,
+    device: Optional[torch.device] = None,
 ):
     h, spins, x0, counts = extract_classical_ising_model(
-        spins, hamiltonian, log_psi, sampled_power=sampled_power
+        spins, hamiltonian, log_psi, sampled_power=sampled_power, device=device
     )
-    beta0 = 6.0
+    beta0 = 6.0 # TODO: Fix me!!
+    # beta1 = 10000.0
     x, _, _ = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     # x2, _, e2 = sa.anneal(h, ~x0, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     # logger.info("{} vs. {}, {} vs. {}", e1[-1], e2[-1], x0 & x1, x0 & x2)
@@ -194,17 +196,17 @@ def _make_log_coeff_fn(amplitude, sign, basis):
     assert isinstance(sign, torch.nn.Module)
 
     dtype = _get_dtype(sign)
+    device = _get_device(sign)
     log_amplitude = amplitude.log().unsqueeze(dim=1)
-    log_amplitude = log_amplitude.to(dtype=dtype)
+    log_amplitude = log_amplitude.to(device=device, dtype=dtype)
 
     @torch.no_grad()
     def log_coeff_fn(spin: Tensor) -> Tensor:
         b = np.pi * sign(spin).argmax(dim=1, keepdim=True).to(dtype)
-        if not isinstance(spin, np.ndarray):
-            spin = spin.numpy().view(np.uint64)
+        spin = spin.cpu().numpy().view(np.uint64)
         if spin.ndim > 1:
             spin = spin[:, 0]
-        indices = torch.from_numpy(ls.batched_index(basis, spin).view(np.int64))
+        indices = torch.from_numpy(ls.batched_index(basis, spin).view(np.int64)).to(device)
         a = log_amplitude[indices]
         return torch.complex(a, b)
 
@@ -222,7 +224,7 @@ def find_ground_state(config):
     # )
 
     log_psi = _make_log_coeff_fn(config.ground_state.abs(), config.model, basis)
-    sampled_power = 1 # True
+    sampled_power = 1.8  # True
     with torch.no_grad():
         p = config.ground_state.abs() ** sampled_power
         p = p.numpy()
@@ -242,13 +244,18 @@ def find_ground_state(config):
 
         spins = basis.states[batch_indices]
         spins, signs, counts = tune_sign_structure(
-            spins, hamiltonian, log_psi, number_sweeps=config.number_sa_sweeps,
-            sampled_power=sampled_power
+            spins,
+            hamiltonian,
+            log_psi,
+            number_sweeps=config.number_sa_sweeps,
+            sampled_power=sampled_power,
+            device=device,
         )
         with torch.no_grad():
             if sampled_power is not None:
-                weights = torch.from_numpy(counts).to(dtype=dtype, device=device)
-                weights /= torch.sum(weights)
+                weights = None
+                # weights = torch.from_numpy(counts).to(dtype=dtype, device=device)
+                # weights /= torch.sum(weights)
             else:
                 assert np.all(counts == 1)
                 weights = torch.from_numpy(p[batch_indices]).to(dtype=dtype, device=device)
@@ -275,6 +282,7 @@ class Mish(torch.nn.Module):
     def forward(self, input: Tensor) -> Tensor:
         return input * torch.tanh(torch.nn.functional.softplus(input))
 
+
 class ConvBlock(torch.nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3):
         super().__init__()
@@ -285,7 +293,8 @@ class ConvBlock(torch.nn.Module):
                 kernel_size=kernel_size,
                 padding=0,
             ),
-            Mish(),
+            torch.nn.ReLU(),
+            # Mish(),
             # torch.nn.MaxPool1d(kernel_size=2),
         )
         self.kernel_size = kernel_size
@@ -298,44 +307,85 @@ class ConvBlock(torch.nn.Module):
 
 
 class Phase(torch.nn.Module):
-    def __init__(self, shape, number_blocks=3, number_channels=8, kernel_size=3):
+    def __init__(self, shape, number_channels, kernel_size=3):
         super().__init__()
-        layers = [ConvBlock(in_channels=1, out_channels=number_channels, kernel_size=kernel_size)]
-        for i in range(number_blocks - 1):
+        number_blocks = len(number_channels)
+        layers = [ConvBlock(in_channels=1, out_channels=number_channels[0], kernel_size=kernel_size)]
+        for i in range(1, len(number_channels)):
             layers.append(
                 ConvBlock(
-                    in_channels=number_channels,
-                    out_channels=number_channels,
+                    in_channels=number_channels[i - 1],
+                    out_channels=number_channels[i],
                     kernel_size=kernel_size,
                 )
             )
         self.shape = shape
         self.layers = torch.nn.Sequential(*layers)
-        self.tail = torch.nn.Linear(number_channels, 2, bias=False)
+        self.tail = torch.nn.Linear(number_channels[-1], 2, bias=False)
 
     def forward(self, x):
         number_spins = self.shape[0] * self.shape[1]
         x = nqs.unpack(x, number_spins)
         x = x.view(x.size(0), 1, *self.shape)
         x = self.layers(x)
-        x = x.view(*x.size()[:2], -1).sum(dim=2)
+        x = x.view(*x.size()[:2], -1).mean(dim=2)
         return self.tail(x)
+
+def pad_circular(x, pad):
+    x = torch.cat([x, x[:, :, 0:pad, :]], dim=2)
+    x = torch.cat([x, x[:, :, :, 0:pad]], dim=3)
+    x = torch.cat([x[:, :, -2 * pad:-pad, :], x], dim=2)
+    x = torch.cat([x[:, :, :, -2 * pad:-pad], x], dim=3)
+    return x
+
+class Net(torch.nn.Module):   
+    def __init__(self, shape: Tuple[int, int], features1: int, features2: int, features3: int, window: int):
+        super().__init__()
+        self._shape = shape
+        self._conv1 = torch.nn.Conv2d(1, features1, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._conv2 = torch.nn.Conv2d(features1, features2, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._conv3 = torch.nn.Conv2d(features2, features3, window, stride=1, padding = 0, dilation=1, groups=1, bias=True)
+        self._dense6 = torch.nn.Linear(features3, 2, bias=True)
+        #self.dropout = torch.nn.Dropout(0.3)
+        self._padding = window//2
+        self._features2 = features2
+        self._features3 = features3
+#    @torch.jit.script_method
+    def forward(self, x):
+        x = nqs.unpack(x, self._shape[0]*self._shape[1])
+        x = x.view((x.shape[0], 1, *self._shape))
+        x = pad_circular(x, self._padding)
+        x = self._conv1(x)
+        x = torch.nn.functional.relu(x)
+        x = pad_circular(x, self._padding)
+        x = self._conv2(x)
+        x = torch.nn.functional.relu(x)
+        x = pad_circular(x, self._padding)
+        x = self._conv3(x)
+        x = torch.nn.functional.relu(x)
+        x = x.view(x.shape[0], self._features3, -1)
+        x = x.mean(dim = 2)
+        x = self._dense6(x)
+        return x
 
 
 def main():
     ground_state, E, representatives = load_ground_state(
-        os.path.join(project_dir(), "data/symm/j1j2_square_4x6.h5")
+        os.path.join(project_dir(), "data/symm/j1j2_square_6x6.h5")
     )
     basis, hamiltonian = load_basis_and_hamiltonian(
-        os.path.join(project_dir(), "data/symm/j1j2_square_4x6.yaml")
+        os.path.join(project_dir(), "data/symm/j1j2_square_6x6.yaml")
     )
     basis.build(representatives)
     representatives = None
+    logger.info("Hilbert space dimension is {}", basis.number_states)
 
     torch.manual_seed(124)
-    np.random.seed(128)
+    np.random.seed(127)
 
-    model = Phase((4, 6), number_blocks=3, number_channels=28, kernel_size=5)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # model = Net((4, 6), 28, 28, 20, window=5) #.to(device)
+    model = Phase((6, 6), number_channels=[32, 32, 32, 32], kernel_size=5).to(device)
     # model = torch.nn.Sequential(
     #     nqs.Unpack(basis.number_spins),
     #     torch.nn.Linear(basis.number_spins, 64),
@@ -343,20 +393,21 @@ def main():
     #     torch.nn.Linear(64, 64),
     #     torch.nn.ReLU(),
     #     torch.nn.Linear(64, 2, bias=False),
-    # )
+    # ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-4)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     config = Config(
         model=model,
         ground_state=ground_state,
         hamiltonian=hamiltonian,
         number_sa_sweeps=10000,
-        number_supervised_epochs=50,
-        number_monte_carlo_samples=20000,
-        number_outer_iterations=100,
-        train_batch_size=256,
-        optimizer=lambda m: optimizer,
+        number_supervised_epochs=20,
+        number_monte_carlo_samples=80000,
+        number_outer_iterations=300,
+        train_batch_size=32,
+        optimizer=lambda m: torch.optim.Adam(model.parameters(), lr=1.52338e-4, weight_decay=5e-5),
         scheduler=lambda m: None,
-        device=torch.device("cpu"),
+        device=device,
     )
     find_ground_state(config)
+    torch.save(model.cpu().state_dict(), "final_model.pt")
