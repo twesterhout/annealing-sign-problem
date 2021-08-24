@@ -143,6 +143,7 @@ def extract_classical_ising_model(
     log_ψ,
     sampled_power: Optional[int] = None,
     device: Optional[torch.device] = None,
+    scale_field: Optional[float] = None,
 ):
     r"""Map quantum Hamiltonian to classical ising model where wavefunction coefficients are now
     considered spin degrees of freedom.
@@ -228,11 +229,20 @@ def extract_classical_ising_model(
         (elements, (row_indices, col_indices)),
         shape=(spins.shape[0], spins.shape[0]),
     )
-    # Symmetrize the matrix if spins come from Monte Carlo sampling
-    if sampled_power is not None:
-        matrix = matrix.tocsr()
-        matrix = 0.5 * (matrix + matrix.T)
-        matrix = matrix.tocoo()
+    # Convert COO matrix to CSR to ensure that duplicate elements are summed
+    # together. Duplicate elements can arise when working in symmetry-adapted
+    # bases.
+    matrix = matrix.tocsr()
+    # Symmetrize the matrix if spins come from Monte Carlo sampling. When
+    # matrix elements do not come from Monte Carlo sampling, symmetrizing does
+    # not hurt and may fix some numerical differences.
+    matrix = 0.5 * (matrix + matrix.T)
+    matrix = matrix.tocoo()
+
+    logger.info("Denseness: {}", np.sum(np.abs(matrix.data)) / spins.shape[0])
+
+    if scale_field is not None:
+        field *= scale_field
     h = sa.Hamiltonian(matrix, field)
 
     # print("Max field", field.max(), np.abs(field).max())
@@ -248,7 +258,8 @@ def extract_classical_ising_model(
     )
 
     logger.info(
-        "Done! The Hamiltonian contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
+        "Done! The Hamiltonian has dimension {} and contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
+        spins.shape[0],
         written,
         np.abs(matrix.data).min(),
         np.abs(matrix.data).max(),
