@@ -87,21 +87,16 @@ def compute_average_loss(dataset, model, loss_fn, accuracy_fn):
 
 
 def prepare_datasets(
-    spins,
-    target_signs,
-    weights,
+    spins: Tensor,
+    target_signs: Tensor,
+    weights: Optional[Tensor],
+    device: torch.device,
+    dtype: torch.dtype,
     train_batch_size: int,
     inference_batch_size: int = 16384,
-    device: torch.device = torch.device("cpu"),
-    dtype: torch.dtype = torch.float32,
 ):
     spins = spins.to(device)
     target_signs = target_signs.to(device)
-    # target_signs = torch.where(
-    #     target_signs > 0,
-    #     torch.scalar_tensor(0, dtype=torch.int64, device=device),
-    #     torch.scalar_tensor(1, dtype=torch.int64, device=device),
-    # )
     if weights is None:
         weights = torch.ones_like(target_signs, device=device, dtype=dtype)
     data = (spins, target_signs, weights)
@@ -135,7 +130,7 @@ def tune_neural_network(
     dtype = _get_dtype(model)
     device = _get_device(model)
     train_dataset, test_dataset = prepare_datasets(
-        spins, target_signs, weights, train_batch_size=batch_size, device=device, dtype=dtype
+        spins, target_signs, weights, device=device, dtype=dtype, train_batch_size=batch_size
     )
     logger.info("Training dataset contains {} samples", spins.size(0))
 
@@ -157,9 +152,6 @@ def tune_neural_network(
             on_epoch_end(epoch + 1, epochs, info["loss"])
     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
     on_epoch_end(epochs, epochs, info["loss"], info["accuracy"])
-    # logger.debug(
-    #     "[{}/{}]: loss = {}, accuracy = {}", epochs, epochs, info["loss"], info["accuracy"]
-    # )
 
 
 def _extract_classical_model_with_exact_fields(
@@ -215,18 +207,19 @@ def tune_sign_structure(
         device=device,
         scale_field=scale_field,
     )
-    h_exact, _, x0_exact, _ = _extract_classical_model_with_exact_fields(
-        spins0,
-        hamiltonian,
-        ground_state,
-        sampled_power=sampled_power,
-        device=device,
-        scale_field=scale_field,
-    )
     x, _, e = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
-    x_with_exact, _, e_with_exact = sa.anneal(
-        h_exact, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
-    )
+    if ground_state is not None:
+        h_exact, _, x0_exact, _ = _extract_classical_model_with_exact_fields(
+            spins0,
+            hamiltonian,
+            ground_state,
+            sampled_power=sampled_power,
+            device=device,
+            scale_field=scale_field,
+        )
+        # x_with_exact, _, e_with_exact = sa.anneal(
+        #     h_exact, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
+        # )
 
     def extract_signs(bits):
         i = np.arange(spins.shape[0], dtype=np.uint64)
@@ -236,37 +229,19 @@ def tune_sign_structure(
         return signs
 
     signs = extract_signs(x)
-    signs_with_exact = extract_signs(x_with_exact)
     signs0 = extract_signs(x0)
-    signs0_exact = extract_signs(x0_exact)
+    if ground_state is not None:
+        signs0_exact = extract_signs(x0_exact)
+        # signs_with_exact = extract_signs(x_with_exact)
+        # accuracy_with_exact = torch.sum(signs0_exact == signs_with_exact).float() / spins.shape[0]
+        accuracy_normal = torch.sum(signs0_exact == signs).float() / spins.shape[0]
+        # logger.debug("SA accuracy with exact fields: {}", accuracy_with_exact)
+        logger.debug("SA accuracy with approximate fields: {}", accuracy_normal)
 
-    logger.info("SA energy with exact fields: {}", e_with_exact[-1])
-    logger.info(
-        "SA accuracy with exact fields: {}",
-        torch.sum(signs0_exact == signs_with_exact).float() / spins.shape[0],
-    )
-    logger.info(
-        "SA accuracy with approximate fields: {}",
-        torch.sum(signs0_exact == signs).float() / spins.shape[0],
-    )
-
-    if torch.sum(signs == signs0).float() / spins.shape[0] < 0.5:
-        logger.warning("Applying global sign flip...")
-        signs = 1 - signs
-    # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-    #     rs = list(executor.map(fn, [None for i in range(1)]))
-
-    # logger.debug([e for (_, e) in rs])
-    # x, _ = min(rs, key=lambda t: t[1])
-    # x2, _, e2 = sa.anneal(h, ~x0, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
-    # logger.info("{} vs. {}, {} vs. {}", e1[-1], e2[-1], x0 & x1, x0 & x2)
-    # x = x1
-    # _, _, _ = sa.anneal(h, x, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
-    # _, _, _ = sa.anneal(h, ~x, seed=None, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
-    # i = np.arange(spins.shape[0], dtype=np.uint64)
-    # signs = (x[i // 64] >> (i % 64)) & 1
-    # signs = 1 - signs
-    # signs = torch.from_numpy(signs.view(np.int64))
+    if False:  # NOTE: disabling for now
+        if torch.sum(signs == signs0).float() / spins.shape[0] < 0.5:
+            logger.warning("Applying global sign flip...")
+            signs = 1 - signs
     return spins, signs, counts
 
 
@@ -573,137 +548,251 @@ class ConvBlock(torch.nn.Module):
             ),
             # Mish(),
             torch.nn.ReLU(inplace=True),
+            torch.nn.BatchNorm2d(out_channels),
             # torch.nn.MaxPool1d(kernel_size=2),
         )
         self.kernel_size = kernel_size
 
     def forward(self, x):
         k = self.kernel_size
-        x = torch.cat([x[:, :, -(k // 2) :, :], x, x[:, :, : k // 2, :]], dim=2)
-        x = torch.cat([x[:, :, :, -(k // 2) :], x, x[:, :, :, : k // 2]], dim=3)
+        x = torch.cat([x[:, :, -((k - 1) // 2) :, :], x, x[:, :, : k // 2, :]], dim=2)
+        x = torch.cat([x[:, :, :, -((k - 1) // 2) :], x, x[:, :, :, : k // 2]], dim=3)
         return self.layer(x)
 
 
-def checkerboard(shape):
-    sites = np.arange(shape[0] * shape[1]).reshape(*shape)
-    sites = sites % shape[1] + sites // shape[1]
-    sites = sites % 2
-    # print(sites)
-    return torch.from_numpy(sites)
-
-
-class MarshallSignRule(torch.nn.Module):
-    def __init__(self, shape):
-        super().__init__()
-        self.shape = shape
-        self.register_buffer("mask", checkerboard(shape).view(-1))
-
-    def forward(self, x):
-        if x.dtype == torch.int64:
-            x = nqs.unpack(x, self.shape[0] * self.shape[1])
-        # x = x.view(x.size(0), self.shape[0] * self.shape[1])
-        mask = self.mask.to(dtype=x.dtype, device=x.device)
-        bias = ((self.shape[0] * self.shape[1] - (x * mask).sum(dim=1)) // 2) % 2
-        # logger.info(bias)
-        bias = 2 * bias - 1
-        # torch.where(bias > 1,
-        #     torch.scalar_tensor(100.0, dtype=x.dtype, device=x.device),
-        #     torch.scalar_tensor(-100.0, dtype=x.dtype, device=x.device)
-        # )
-        # bias = torch.cos(np.pi * 0.5 * (1 - (x * mask).sum(dim=1)))
-        bias = torch.stack([torch.zeros_like(bias), bias], dim=1)
-        return bias
-
-
-class Phase(torch.nn.Module):
+class ConvModel(torch.nn.Module):
     def __init__(self, shape, number_channels, kernel_size=3):
         super().__init__()
         number_blocks = len(number_channels)
+        if isinstance(kernel_size, int):
+            kernel_size = [kernel_size for _ in number_channels]
+        else:
+            assert isinstance(kernel_size, (list, tuple))
+            assert len(kernel_size) == number_blocks
+
         layers = [
-            ConvBlock(in_channels=1, out_channels=number_channels[0], kernel_size=kernel_size)
+            ConvBlock(in_channels=1, out_channels=number_channels[0], kernel_size=kernel_size[0])
         ]
         for i in range(1, len(number_channels)):
             layers.append(
                 ConvBlock(
                     in_channels=number_channels[i - 1],
                     out_channels=number_channels[i],
-                    kernel_size=kernel_size,
+                    kernel_size=kernel_size[i],
                 )
             )
+
         self.shape = shape
         self.layers = torch.nn.Sequential(*layers)
-        # self.tail = torch.nn.Linear(number_channels[-1], 2, bias=False)
-        self.tail = torch.nn.Linear(shape[0] * shape[1] * number_channels[-1], 2, bias=False)
-        self.msr = MarshallSignRule(shape)
-        self.scale = 1.0
+        self.tail = torch.nn.Linear(shape[0] * shape[1] * number_channels[-1], 2)
 
     def forward(self, x):
         number_spins = self.shape[0] * self.shape[1]
-        input = nqs.unpack(x, number_spins)
-        x = input.view(input.size(0), 1, *self.shape)
-        x = self.layers(x)
-        # x = x.view(x.size(0), x.size(1), -1).mean(dim=2)
-        x = x.view(x.size(0), -1)
-        return self.tail(x) + self.scale * self.msr(input)
-
-
-def pad_circular(x, pad):
-    x = torch.cat([x, x[:, :, 0:pad, :]], dim=2)
-    x = torch.cat([x, x[:, :, :, 0:pad]], dim=3)
-    x = torch.cat([x[:, :, -2 * pad : -pad, :], x], dim=2)
-    x = torch.cat([x[:, :, :, -2 * pad : -pad], x], dim=3)
-    return x
-
-
-class Net(torch.nn.Module):
-    def __init__(
-        self, shape: Tuple[int, int], features1: int, features2: int, features3: int, window: int
-    ):
-        super().__init__()
-        self._shape = shape
-        self._conv1 = torch.nn.Conv2d(
-            1, features1, window, stride=1, padding=0, dilation=1, groups=1, bias=True
-        )
-        self._conv2 = torch.nn.Conv2d(
-            features1, features2, window, stride=1, padding=0, dilation=1, groups=1, bias=True
-        )
-        self._conv3 = torch.nn.Conv2d(
-            features2, features3, window, stride=1, padding=0, dilation=1, groups=1, bias=True
-        )
-        self._dense6 = torch.nn.Linear(features3, 2, bias=True)
-        # self.dropout = torch.nn.Dropout(0.3)
-        self._padding = window // 2
-        self._features2 = features2
-        self._features3 = features3
-
-    #    @torch.jit.script_method
-    def forward(self, x):
-        x = nqs.unpack(x, self._shape[0] * self._shape[1])
-        x = x.view((x.shape[0], 1, *self._shape))
-        x = pad_circular(x, self._padding)
-        x = self._conv1(x)
-        x = torch.nn.functional.relu(x)
-        x = pad_circular(x, self._padding)
-        x = self._conv2(x)
-        x = torch.nn.functional.relu(x)
-        x = pad_circular(x, self._padding)
-        x = self._conv3(x)
-        x = torch.nn.functional.relu(x)
-        x = x.view(x.shape[0], self._features3, -1)
-        x = x.mean(dim=2)
-        x = self._dense6(x)
+        x = nqs.unpack(x, number_spins)
+        x = self.layers(x.view(-1, 1, *self.shape))
+        x = self.tail(x.view(x.size(0), -1))
         return x
 
 
-class CombinedModel(torch.nn.Module):
-    def __init__(self, shape, model):
+class DenseModel(torch.nn.Module):
+    def __init__(self, shape, number_features, use_batchnorm=True, dropout=None):
         super().__init__()
+        number_blocks = len(number_features)
+        layers = [torch.nn.Linear(shape[0] * shape[1], number_features[0])]
+        for i in range(1, len(number_channels)):
+            layers.append(torch.nn.ReLU(inplace=True))
+            if use_batchnorm:
+                layers.append(torch.nn.BatchNorm1d(number_features[i - 1]))
+            if dropout is not None:
+                layers.append(torch.nn.Dropout(p=dropout, inplace=True))
+            layers.append(torch.nn.Linear(widths[i - 1], number_features[i]))
+
         self.shape = shape
-        self.msr = MarshallSignRule(shape).to(_get_device(model))
-        self.model = model
+        self.layers = torch.nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.model(x) + 2.0 * self.msr(x)
+        number_spins = self.shape[0] * self.shape[1]
+        x = nqs.unpack(x, number_spins)
+        return self.layers(x)
+
+
+if False:
+
+    def checkerboard(shape):
+        sites = np.arange(shape[0] * shape[1]).reshape(*shape)
+        sites = sites % shape[1] + sites // shape[1]
+        sites = sites % 2
+        # print(sites)
+        return torch.from_numpy(sites)
+
+    class MarshallSignRule(torch.nn.Module):
+        def __init__(self, shape):
+            super().__init__()
+            self.shape = shape
+            self.register_buffer("mask", checkerboard(shape).view(-1))
+
+        def forward(self, x):
+            if x.dtype == torch.int64:
+                x = nqs.unpack(x, self.shape[0] * self.shape[1])
+            # x = x.view(x.size(0), self.shape[0] * self.shape[1])
+            mask = self.mask.to(dtype=x.dtype, device=x.device)
+            bias = ((self.shape[0] * self.shape[1] - (x * mask).sum(dim=1)) // 2) % 2
+            # logger.info(bias)
+            bias = 2 * bias - 1
+            # torch.where(bias > 1,
+            #     torch.scalar_tensor(100.0, dtype=x.dtype, device=x.device),
+            #     torch.scalar_tensor(-100.0, dtype=x.dtype, device=x.device)
+            # )
+            # bias = torch.cos(np.pi * 0.5 * (1 - (x * mask).sum(dim=1)))
+            bias = torch.stack([torch.zeros_like(bias), bias], dim=1)
+            return bias
+
+
+if False:
+
+    class Phase(torch.nn.Module):
+        def __init__(self, shape, number_channels, kernel_size=3):
+            super().__init__()
+            number_blocks = len(number_channels)
+            layers = [
+                ConvBlock(in_channels=1, out_channels=number_channels[0], kernel_size=kernel_size)
+            ]
+            for i in range(1, len(number_channels)):
+                layers.append(
+                    ConvBlock(
+                        in_channels=number_channels[i - 1],
+                        out_channels=number_channels[i],
+                        kernel_size=kernel_size,
+                    )
+                )
+            self.shape = shape
+            self.layers = torch.nn.Sequential(*layers)
+            # self.tail = torch.nn.Linear(number_channels[-1], 2, bias=False)
+            self.tail = torch.nn.Linear(shape[0] * shape[1] * number_channels[-1], 2, bias=False)
+            self.msr = MarshallSignRule(shape)
+            self.scale = 1.0
+
+        def forward(self, x):
+            number_spins = self.shape[0] * self.shape[1]
+            input = nqs.unpack(x, number_spins)
+            x = input.view(input.size(0), 1, *self.shape)
+            x = self.layers(x)
+            # x = x.view(x.size(0), x.size(1), -1).mean(dim=2)
+            x = x.view(x.size(0), -1)
+            return self.tail(x) + self.scale * self.msr(input)
+
+
+if False:
+
+    def pad_circular(x, pad):
+        x = torch.cat([x, x[:, :, 0:pad, :]], dim=2)
+        x = torch.cat([x, x[:, :, :, 0:pad]], dim=3)
+        x = torch.cat([x[:, :, -2 * pad : -pad, :], x], dim=2)
+        x = torch.cat([x[:, :, :, -2 * pad : -pad], x], dim=3)
+        return x
+
+    class Net(torch.nn.Module):
+        def __init__(
+            self,
+            shape: Tuple[int, int],
+            features1: int,
+            features2: int,
+            features3: int,
+            window: int,
+        ):
+            super().__init__()
+            self._shape = shape
+            self._conv1 = torch.nn.Conv2d(
+                1, features1, window, stride=1, padding=0, dilation=1, groups=1, bias=True
+            )
+            self._conv2 = torch.nn.Conv2d(
+                features1, features2, window, stride=1, padding=0, dilation=1, groups=1, bias=True
+            )
+            self._conv3 = torch.nn.Conv2d(
+                features2, features3, window, stride=1, padding=0, dilation=1, groups=1, bias=True
+            )
+            self._dense6 = torch.nn.Linear(features3, 2, bias=True)
+            # self.dropout = torch.nn.Dropout(0.3)
+            self._padding = window // 2
+            self._features2 = features2
+            self._features3 = features3
+
+        #    @torch.jit.script_method
+        def forward(self, x):
+            x = nqs.unpack(x, self._shape[0] * self._shape[1])
+            x = x.view((x.shape[0], 1, *self._shape))
+            x = pad_circular(x, self._padding)
+            x = self._conv1(x)
+            x = torch.nn.functional.relu(x)
+            x = pad_circular(x, self._padding)
+            x = self._conv2(x)
+            x = torch.nn.functional.relu(x)
+            x = pad_circular(x, self._padding)
+            x = self._conv3(x)
+            x = torch.nn.functional.relu(x)
+            x = x.view(x.shape[0], self._features3, -1)
+            x = x.mean(dim=2)
+            x = self._dense6(x)
+            return x
+
+
+def run_triangle_6x6():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sweeps", type=int, default=10000, help="Number of SA sweeps.")
+    parser.add_argument("--samples", type=int, default=100000, help="Number MC samples.")
+    parser.add_argument("--epochs", type=int, default=200, help="Number supervised epochs.")
+    parser.add_argument("--iters", type=int, default=100, help="Number outer iterations.")
+    parser.add_argument("--batch-size", type=int, default=256, help="Training batch size.")
+    parser.add_argument("--seed", type=int, default=None, help="Seed.")
+    parser.add_argument("--device", type=str, default=None, help="Device.")
+    parser.add_argument("--widths", type=str, required=True, help="Layer widths.")
+    args = parser.parse_args()
+
+    ground_state, E, representatives = load_ground_state(
+        os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
+    )
+    basis, hamiltonian = load_basis_and_hamiltonian(
+        os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
+    )
+    basis.build(representatives)
+    representatives = None
+    logger.debug("Hilbert space dimension is {}", basis.number_states)
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        logger.debug("Seeding Torch and NumPy with seed={}...", args.seed)
+
+    if args.device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        device = torch.device(args.device)
+
+    widths = eval(args.widths)
+    # model = DenseModel((6, 6), number_features=widths, use_batchnorm=True).to(device)
+    model = ConvModel((6, 6), number_channels=widths, kernel_size=4).to(device)
+    # model.load_state_dict(torch.load("runs/symm/triangle_6x6/124/model_4.pt"))
+    logger.info(model)
+    logger.debug("Contains {} parameters", sum(t.numel() for t in model.parameters()))
+
+    optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=5e-4)
+    scheduler=lambda o: None # torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=args.epochs, eta_min=1e-4)
+    config = Config(
+        model=model,
+        ground_state=ground_state,
+        hamiltonian=hamiltonian,
+        number_sa_sweeps=args.sweeps,
+        number_supervised_epochs=args.epochs,
+        number_monte_carlo_samples=args.samples,
+        number_outer_iterations=args.iters,
+        train_batch_size=args.batch_size,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        device=device,
+        output="runs/symm/triangle_6x6/{}".format(args.seed if args.seed is not None else "dummy"),
+    )
+    os.makedirs(config.output, exist_ok=True)
+    find_ground_state(config)
 
 
 def main():
@@ -734,7 +823,7 @@ def main():
     np.random.seed(args.seed)
     logger.info("Using seed={}", args.seed)
 
-    device = torch.device(args.device) # "cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device)  # "cuda" if torch.cuda.is_available() else "cpu")
     # model = Net((4, 6), 28, 28, 20, window=5) #.to(device)
     # model = Phase((6, 6), number_channels=[32, 32, 32], kernel_size=5).to(device)
     # model = MarshallSignRule((6, 6)).to(device)
@@ -746,10 +835,7 @@ def main():
     if args.w3 is not None:
         widths.append(args.w3)
     widths.append(2)
-    layers = [
-        nqs.Unpack(basis.number_spins),
-        torch.nn.Linear(basis.number_spins, args.w1)
-    ]
+    layers = [nqs.Unpack(basis.number_spins), torch.nn.Linear(basis.number_spins, args.w1)]
     for i in range(1, len(widths)):
         layers += [
             torch.nn.ReLU(),
@@ -786,15 +872,18 @@ def main():
         # lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5),
         # Settings for 64->64->64->64 with k=5
         # optimizer=lambda m: torch.optim.SGD(model.parameters(), lr=4e-2, momentum=0.95),
-        optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3), # , momentum=0.9),
-        scheduler=lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=args.epochs, eta_min=1e-4),
+        optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3),  # , momentum=0.9),
+        scheduler=lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(
+            o, T_max=args.epochs, eta_min=1e-4
+        ),
         # optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3), # , momentum=0.9),
         # torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95), # , momentum=0.9),
         # torch.optim.AdamW(model.parameters(), lr=1e-3), # , momentum=0.9),
         # scheduler=lambda o: None,
         # torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=300, eta_min=5e-4),
         device=device,
-        output="runs/symm/triangle_6x6/{}".format(args.seed)
+        output="runs/symm/triangle_6x6/{}".format(args.seed),
     )
+    os.makedirs(config.output, exists_ok=True)
     # supervised_learning_test(config)
     find_ground_state(config)
