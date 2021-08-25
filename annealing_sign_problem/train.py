@@ -1,3 +1,4 @@
+import argparse
 from .common import *
 import ctypes
 from collections import namedtuple
@@ -641,34 +642,65 @@ class CombinedModel(torch.nn.Module):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sweeps", type=int, help="Number of SA sweeps.")
+    parser.add_argument("--samples", type=int, help="Number MC samples.")
+    parser.add_argument("--epochs", type=int, help="Number epochs.")
+    parser.add_argument("--iters", type=int, help="Number outer iterations.")
+    parser.add_argument("--batch-size", type=int, help="Training batch size.")
+    parser.add_argument("--w1", type=int, help="1st layer's width.")
+    parser.add_argument("--w2", type=int, help="2nd layer's width.")
+    parser.add_argument("--w3", type=int, help="3rd layer's width.")
+    parser.add_argument("--seed", type=int, help="Seed.")
+    parser.add_argument("--device", type=str, help="Device.")
+    args = parser.parse_args()
+
     ground_state, E, representatives = load_ground_state(
-        os.path.join(project_dir(), "data/symm/j1j2_square_6x6.h5")
+        os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
     )
     basis, hamiltonian = load_basis_and_hamiltonian(
-        os.path.join(project_dir(), "data/symm/j1j2_square_6x6.yaml")
+        os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
     )
     basis.build(representatives)
     representatives = None
     logger.info("Hilbert space dimension is {}", basis.number_states)
 
-    torch.manual_seed(127)
-    np.random.seed(125)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(args.device) # "cuda" if torch.cuda.is_available() else "cpu")
     # model = Net((4, 6), 28, 28, 20, window=5) #.to(device)
-    model = Phase((6, 6), number_channels=[32, 32, 32], kernel_size=5).to(device)
+    # model = Phase((6, 6), number_channels=[32, 32, 32], kernel_size=5).to(device)
     # model = MarshallSignRule((6, 6)).to(device)
     # model = Phase((6, 6), number_channels=[64, 64], kernel_size=5).to(device)
     # model.scale = 0.0
-    # model = torch.nn.Sequential(
+    widths = [args.w1]
+    if args.w2 is not None:
+        widths.append(args.w2)
+    if args.w3 is not None:
+        widths.append(args.w3)
+    widths.append(2)
+    layers = [
+        nqs.Unpack(basis.number_spins),
+        torch.nn.Linear(basis.number_spins, args.w1)
+    ]
+    for i in range(1, len(widths)):
+        layers += [
+            torch.nn.ReLU(),
+            torch.nn.BatchNorm1d(widths[i - 1]),
+            torch.nn.Linear(widths[i - 1], widths[i]),
+        ]
+
+    model = torch.nn.Sequential(*layers).to(device)
+    logger.info(model)
     #     nqs.Unpack(basis.number_spins),
-    #     torch.nn.Linear(basis.number_spins, 256),
+    #     torch.nn.Linear(basis.number_spins, args.w1),
     #     torch.nn.ReLU(),
-    #     torch.nn.BatchNorm1d(256),
-    #     torch.nn.Linear(256, 256),
+    #     torch.nn.BatchNorm1d(args.w1),
+    #     torch.nn.Linear(args.w1, args.w2),
     #     torch.nn.ReLU(),
-    #     torch.nn.BatchNorm1d(256),
-    #     torch.nn.Linear(256, 2, bias=False),
+    #     torch.nn.BatchNorm1d(args.w2),
+    #     torch.nn.Linear(args.w2, 2, bias=False),
     # ).to(device)
     # model = CombinedModel((6, 6), model)
     # model.load_state_dict(torch.load("final_model.pt"))
@@ -680,25 +712,25 @@ def main():
         model=model,
         ground_state=ground_state,
         hamiltonian=hamiltonian,
-        number_sa_sweeps=10000,
-        number_supervised_epochs=500,
-        number_monte_carlo_samples=40000,
-        number_outer_iterations=200,
-        train_batch_size=256,
+        number_sa_sweeps=args.sweeps,
+        number_supervised_epochs=args.epochs,
+        number_monte_carlo_samples=args.samples,
+        number_outer_iterations=args.iters,
+        train_batch_size=args.batch_size,
         # lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-5),
         # Settings for 64->64->64->64 with k=5
-        optimizer=lambda m: torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95),
-        scheduler=lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=200, eta_min=1e-4),
+        # optimizer=lambda m: torch.optim.SGD(model.parameters(), lr=4e-2, momentum=0.95),
+        optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3), # , momentum=0.9),
+        scheduler=lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=args.epochs, eta_min=1e-4),
         # optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3), # , momentum=0.9),
         # torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95), # , momentum=0.9),
         # torch.optim.AdamW(model.parameters(), lr=1e-3), # , momentum=0.9),
         # scheduler=lambda o: None,
         # torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=300, eta_min=5e-4),
         device=device,
-        output="runs/6x6/074"
+        output="runs/symm/triangle_6x6/{}".format(args.seed)
         # output="runs/full/6x6/001"
     )
     # supervised_learning_test(config)
-    # return
     find_ground_state(config)
-    torch.save(model.cpu().state_dict(), "final_model.pt")
+    torch.save(model.cpu().state_dict(), os.path.join(config.output, "final_model.pt"))
