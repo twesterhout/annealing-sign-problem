@@ -155,7 +155,7 @@ def tune_neural_network(
 
 
 def _extract_classical_model_with_exact_fields(
-    spins, hamiltonian, ground_state, sampled_power, device, scale_field
+    spins, hamiltonian, ground_state, sampled_power, device
 ):
     basis = hamiltonian.basis
     log_amplitude = ground_state.abs().log().unsqueeze(dim=1)
@@ -181,7 +181,6 @@ def _extract_classical_model_with_exact_fields(
         log_coeff_fn,
         sampled_power=sampled_power,
         device=device,
-        scale_field=scale_field,
     )
 
 
@@ -215,7 +214,6 @@ def tune_sign_structure(
             ground_state,
             sampled_power=sampled_power,
             device=device,
-            scale_field=scale_field,
         )
         # x_with_exact, _, e_with_exact = sa.anneal(
         #     h_exact, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
@@ -337,7 +335,11 @@ def find_ground_state(config):
             overlap = torch.dot(2 * mask.to(ground_state.dtype) - 1, ground_state ** 2)
         return accuracy, overlap
 
-    scale_field = [None for _ in range(100)]  # np.linspace(0, 1, 30)
+    accuracy, overlap = compute_metrics()
+    logger.info("Accuracy = {}, overlap = {}", accuracy, overlap)
+
+    # scale_field = [0, 0] + [None for _ in range(config.number_outer_iterations - 2)]
+    scale_field = [0] + [None for _ in range(config.number_outer_iterations)]
     for i in range(config.number_outer_iterations):
         logger.info("Starting outer iteration {}...", i + 1)
         if sampled_power is not None:
@@ -746,6 +748,7 @@ def run_triangle_6x6():
     parser.add_argument("--seed", type=int, default=None, help="Seed.")
     parser.add_argument("--device", type=str, default=None, help="Device.")
     parser.add_argument("--widths", type=str, required=True, help="Layer widths.")
+    parser.add_argument("--kernels", type=str, help="Layer widths.")
     args = parser.parse_args()
 
     ground_state, E, representatives = load_ground_state(
@@ -760,8 +763,8 @@ def run_triangle_6x6():
 
     if args.seed is not None:
         torch.manual_seed(args.seed)
-        np.random.seed(args.seed)
-        logger.debug("Seeding Torch and NumPy with seed={}...", args.seed)
+        np.random.seed(args.seed + 1)
+        logger.debug("Seeding PyTorch and NumPy with seed={}...", args.seed)
 
     if args.device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -769,14 +772,30 @@ def run_triangle_6x6():
         device = torch.device(args.device)
 
     widths = eval(args.widths)
+    if args.kernels is not None:
+        kernel_size = eval(args.kernels)
+    else:
+        kernel_size = 4
     # model = DenseModel((6, 6), number_features=widths, use_batchnorm=True).to(device)
-    model = ConvModel((6, 6), number_channels=widths, kernel_size=4).to(device)
-    # model.load_state_dict(torch.load("runs/symm/triangle_6x6/124/model_4.pt"))
+    model = ConvModel((6, 6), number_channels=widths, kernel_size=kernel_size).to(device)
+    # model.load_state_dict(torch.load("runs/symm/triangle_6x6/126/model_10.pt"))
+
+    # [64, 64, 64] with kernel_size=4
+    # SGD + CosineAnnealingLR initial lr=1e-2, final lr=1e-4, momentum=0.95
+    # epochs=100, batch_size=256
+    # First outer iteration without fields!
+    # -> 99.3-99.4% overlap in ~10 outer iterations
+    # model.load_state_dict(torch.load("runs/symm/triangle_6x6/132/model_1.pt"))
+    # model.load_state_dict(torch.load("runs/symm/triangle_6x6/133/model_2.pt"))
+
+
     logger.info(model)
     logger.debug("Contains {} parameters", sum(t.numel() for t in model.parameters()))
 
-    optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=5e-4)
-    scheduler=lambda o: None # torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=args.epochs, eta_min=1e-4)
+    # optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=5e-4)
+    # scheduler=lambda o: None
+    optimizer=lambda m: torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95)
+    scheduler=lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=args.epochs, eta_min=1e-3)
     config = Config(
         model=model,
         ground_state=ground_state,
