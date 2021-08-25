@@ -129,7 +129,7 @@ def tune_neural_network(
     scheduler,
     epochs: int,
     batch_size: int,
-    on_epoch_end = default_on_epoch_end,
+    on_epoch_end=default_on_epoch_end,
 ):
     logger.info("Starting supervised training...")
     dtype = _get_dtype(model)
@@ -162,6 +162,37 @@ def tune_neural_network(
     # )
 
 
+def _extract_classical_model_with_exact_fields(
+    spins, hamiltonian, ground_state, sampled_power, device, scale_field
+):
+    basis = hamiltonian.basis
+    log_amplitude = ground_state.abs().log().unsqueeze(dim=1)
+    log_sign = torch.where(
+        ground_state >= 0,
+        torch.scalar_tensor(0, device=device, dtype=ground_state.dtype),
+        torch.scalar_tensor(np.pi, device=device, dtype=ground_state.dtype),
+    ).unsqueeze(dim=1)
+
+    @torch.no_grad()
+    def log_coeff_fn(spin: Tensor) -> Tensor:
+        spin = spin.cpu().numpy().view(np.uint64)
+        if spin.ndim > 1:
+            spin = spin[:, 0]
+        indices = torch.from_numpy(ls.batched_index(basis, spin).view(np.int64)).to(device)
+        a = log_amplitude[indices]
+        b = log_sign[indices]
+        return torch.complex(a, b)
+
+    return extract_classical_ising_model(
+        spins,
+        hamiltonian,
+        log_coeff_fn,
+        sampled_power=sampled_power,
+        device=device,
+        scale_field=scale_field,
+    )
+
+
 def tune_sign_structure(
     spins: np.ndarray,
     hamiltonian: ls.Operator,
@@ -172,15 +203,30 @@ def tune_sign_structure(
     beta1: Optional[int] = None,
     sampled_power: Optional[int] = None,
     device: Optional[torch.device] = None,
-    scale_field = None,
+    scale_field=None,
+    ground_state=None,
 ):
+    spins0 = spins
     h, spins, x0, counts = extract_classical_ising_model(
-        spins, hamiltonian, log_psi, sampled_power=sampled_power,
-        device=device, scale_field=scale_field
+        spins0,
+        hamiltonian,
+        log_psi,
+        sampled_power=sampled_power,
+        device=device,
+        scale_field=scale_field,
     )
-    # beta0 = 6.0 # TODO: Fix me!!
-    # beta1 = 10000.0
+    h_exact, _, x0_exact, _ = _extract_classical_model_with_exact_fields(
+        spins0,
+        hamiltonian,
+        ground_state,
+        sampled_power=sampled_power,
+        device=device,
+        scale_field=scale_field,
+    )
     x, _, e = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
+    x_with_exact, _, e_with_exact = sa.anneal(
+        h_exact, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
+    )
 
     def extract_signs(bits):
         i = np.arange(spins.shape[0], dtype=np.uint64)
@@ -190,9 +236,22 @@ def tune_sign_structure(
         return signs
 
     signs = extract_signs(x)
+    signs_with_exact = extract_signs(x_with_exact)
     signs0 = extract_signs(x0)
+    signs0_exact = extract_signs(x0_exact)
+
+    logger.info("SA energy with exact fields: {}", e_with_exact[-1])
+    logger.info(
+        "SA accuracy with exact fields: {}",
+        torch.sum(signs0_exact == signs_with_exact).float() / spins.shape[0],
+    )
+    logger.info(
+        "SA accuracy with approximate fields: {}",
+        torch.sum(signs0_exact == signs).float() / spins.shape[0],
+    )
 
     if torch.sum(signs == signs0).float() / spins.shape[0] < 0.5:
+        logger.warning("Applying global sign flip...")
         signs = 1 - signs
     # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
     #     rs = list(executor.map(fn, [None for i in range(1)]))
@@ -225,7 +284,7 @@ Config = namedtuple(
         "optimizer",
         "scheduler",
         "device",
-        "output"
+        "output",
     ],
 )
 
@@ -279,7 +338,7 @@ def find_ground_state(config):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     log_psi = _make_log_coeff_fn(config.ground_state.abs(), config.model, basis, dtype, device)
-    sampled_power = 2  # True
+    sampled_power = 2.0  # True
     with torch.no_grad():
         p = config.ground_state.abs() ** sampled_power
         p = p.numpy()
@@ -303,8 +362,7 @@ def find_ground_state(config):
             overlap = torch.dot(2 * mask.to(ground_state.dtype) - 1, ground_state ** 2)
         return accuracy, overlap
 
-
-    scale_field = [1 for _ in range(100)] # np.linspace(0, 1, 30)
+    scale_field = [None for _ in range(100)]  # np.linspace(0, 1, 30)
     for i in range(config.number_outer_iterations):
         logger.info("Starting outer iteration {}...", i + 1)
         if sampled_power is not None:
@@ -324,7 +382,8 @@ def find_ground_state(config):
             number_sweeps=config.number_sa_sweeps,
             sampled_power=sampled_power,
             device=device,
-            scale_field=scale_field[i]
+            scale_field=scale_field[i],
+            ground_state=ground_state,
         )
         with torch.no_grad():
             if sampled_power is not None:
@@ -348,7 +407,9 @@ def find_ground_state(config):
             epochs=config.number_supervised_epochs,
             batch_size=config.train_batch_size,
         )
-        torch.save(config.model.state_dict(), os.path.join(config.output, "model_{}.pt".format(i + 1)))
+        torch.save(
+            config.model.state_dict(), os.path.join(config.output, "model_{}.pt".format(i + 1))
+        )
         accuracy, overlap = compute_metrics()
         logger.info("Accuracy = {}, overlap = {}", accuracy, overlap)
 
@@ -439,9 +500,7 @@ def supervised_learning_test(config):
     #         weights /= torch.sum(weights)
 
     logger.info("{}", torch.sum(1 - 2 * correct_sign_structure))
-    logger.info("{}", torch.dot(1 - 2 * correct_sign_structure.double(), ground_state**2))
-
-
+    logger.info("{}", torch.dot(1 - 2 * correct_sign_structure.double(), ground_state ** 2))
 
     def compute_metrics():
         with torch.no_grad():
@@ -462,7 +521,14 @@ def supervised_learning_test(config):
             tb_writer.add_scalar("loss", loss, epoch)
             tb_writer.add_scalar("accuracy", accuracy, epoch)
             tb_writer.add_scalar("overlap", overlap, epoch)
-            logger.debug("[{}/{}]: loss = {}, accuracy = {}, overlap = {}", epoch, epochs, loss, accuracy, overlap)
+            logger.debug(
+                "[{}/{}]: loss = {}, accuracy = {}, overlap = {}",
+                epoch,
+                epochs,
+                loss,
+                accuracy,
+                overlap,
+            )
         else:
             if accuracy is not None:
                 logger.debug("[{}/{}]: loss = {}, accuracy = {}", epoch, epochs, loss, accuracy)
@@ -539,7 +605,7 @@ class MarshallSignRule(torch.nn.Module):
         mask = self.mask.to(dtype=x.dtype, device=x.device)
         bias = ((self.shape[0] * self.shape[1] - (x * mask).sum(dim=1)) // 2) % 2
         # logger.info(bias)
-        bias = (2 * bias - 1)
+        bias = 2 * bias - 1
         # torch.where(bias > 1,
         #     torch.scalar_tensor(100.0, dtype=x.dtype, device=x.device),
         #     torch.scalar_tensor(-100.0, dtype=x.dtype, device=x.device)
@@ -640,7 +706,6 @@ class CombinedModel(torch.nn.Module):
         return self.model(x) + 2.0 * self.msr(x)
 
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sweeps", type=int, help="Number of SA sweeps.")
@@ -667,6 +732,7 @@ def main():
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    logger.info("Using seed={}", args.seed)
 
     device = torch.device(args.device) # "cuda" if torch.cuda.is_available() else "cpu")
     # model = Net((4, 6), 28, 28, 20, window=5) #.to(device)
@@ -703,7 +769,7 @@ def main():
     #     torch.nn.Linear(args.w2, 2, bias=False),
     # ).to(device)
     # model = CombinedModel((6, 6), model)
-    # model.load_state_dict(torch.load("final_model.pt"))
+    # model.load_state_dict(torch.load("runs/6x6/075/model_3.pt"))
     # model = torch.jit.script(model)
     logger.info("Model contains {} parameters", sum(t.numel() for t in model.parameters()))
 
@@ -729,8 +795,6 @@ def main():
         # torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=300, eta_min=5e-4),
         device=device,
         output="runs/symm/triangle_6x6/{}".format(args.seed)
-        # output="runs/full/6x6/001"
     )
     # supervised_learning_test(config)
     find_ground_state(config)
-    torch.save(model.cpu().state_dict(), os.path.join(config.output, "final_model.pt"))
