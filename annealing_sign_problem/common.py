@@ -226,8 +226,7 @@ def extract_classical_ising_model(
     elements = elements[:written]
 
     matrix = scipy.sparse.coo_matrix(
-        (elements, (row_indices, col_indices)),
-        shape=(spins.shape[0], spins.shape[0]),
+        (elements, (row_indices, col_indices)), shape=(spins.shape[0], spins.shape[0]),
     )
     # Convert COO matrix to CSR to ensure that duplicate elements are summed
     # together. Duplicate elements can arise when working in symmetry-adapted
@@ -239,7 +238,7 @@ def extract_classical_ising_model(
     matrix = 0.5 * (matrix + matrix.T)
     matrix = matrix.tocoo()
 
-    logger.info("Denseness: {}", np.sum(np.abs(matrix.data)) / spins.shape[0])
+    logger.debug("Denseness: {}", np.sum(np.abs(matrix.data)) / spins.shape[0])
 
     if scale_field is not None:
         field *= scale_field
@@ -252,18 +251,16 @@ def extract_classical_ising_model(
 
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
     _lib.extract_signs(
-        spins.shape[0],
-        ψs.ctypes.data_as(POINTER(c_double)),
-        x0.ctypes.data_as(POINTER(c_uint64)),
+        spins.shape[0], ψs.ctypes.data_as(POINTER(c_double)), x0.ctypes.data_as(POINTER(c_uint64)),
     )
 
     logger.info(
-        "Done! The Hamiltonian has dimension {} and contains {} non-zero elements. Jₘᵢₙ = {}, Jₘₐₓ = {}",
+        "Done! The Hamiltonian has dimension {} and contains {} non-zero elements.",
         spins.shape[0],
         written,
-        np.abs(matrix.data).min(),
-        np.abs(matrix.data).max(),
     )
+    logger.debug("Jₘᵢₙ = {}, Jₘₐₓ = {}", np.abs(matrix.data).min(), np.abs(matrix.data).max())
+    logger.debug("Bₘᵢₙ = {}, Bₘₐₓ = {}", np.abs(field).min(), np.abs(field).max())
 
     return h, spins, x0, counts
 
