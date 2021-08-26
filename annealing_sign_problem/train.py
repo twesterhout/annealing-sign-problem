@@ -41,7 +41,9 @@ class TensorIterableDataset(torch.utils.data.IterableDataset):
         return zip(*(torch.split(tensor, self.batch_size) for tensor in tensors))
 
 
-def supervised_loop_once(dataset, model, optimizer, scheduler, loss_fn):
+def supervised_loop_once(
+    dataset, model, optimizer, scheduler, loss_fn, swa_model=None, swa_scheduler=None
+):
     tick = time.time()
     model.train()
     total_loss = 0
@@ -58,6 +60,11 @@ def supervised_loop_once(dataset, model, optimizer, scheduler, loss_fn):
         total_count += x.size(0)
     if scheduler is not None:
         scheduler.step()
+    if swa_model is not None:
+        assert scheduler is None
+        assert swa_scheduler is not None
+        swa_model.update_parameters(model)
+        swa_scheduler.step()
     tock = time.time()
     return {"loss": total_loss / total_count, "time": tock - tick}
 
@@ -144,12 +151,28 @@ def tune_neural_network(
         r = (ŷ.argmax(dim=1) == y).to(w.dtype)
         return torch.dot(r, w)
 
+    use_swa = True
+
+    if use_swa:
+        swa_model = torch.optim.swa_utils.AveragedModel(model)
+        swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=4e-3)
+
     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
     on_epoch_end(0, epochs, info["loss"], info["accuracy"])
     for epoch in range(epochs):
-        info = supervised_loop_once(train_dataset, model, optimizer, scheduler, loss_fn)
+        if use_swa and epoch >= epochs - 50:
+            info = supervised_loop_once(
+                train_dataset, model, optimizer, None, loss_fn, swa_model, swa_scheduler
+            )
+        else:
+            info = supervised_loop_once(train_dataset, model, optimizer, scheduler, loss_fn)
         if epoch != epochs - 1:
             on_epoch_end(epoch + 1, epochs, info["loss"])
+
+    if use_swa:
+        torch.optim.swa_utils.update_bn(train_dataset, swa_model)
+        model.load_state_dict(swa_model.module.state_dict())
+
     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
     on_epoch_end(epochs, epochs, info["loss"], info["accuracy"])
 
@@ -176,11 +199,7 @@ def _extract_classical_model_with_exact_fields(
         return torch.complex(a, b)
 
     return extract_classical_ising_model(
-        spins,
-        hamiltonian,
-        log_coeff_fn,
-        sampled_power=sampled_power,
-        device=device,
+        spins, hamiltonian, log_coeff_fn, sampled_power=sampled_power, device=device,
     )
 
 
@@ -209,11 +228,7 @@ def tune_sign_structure(
     x, _, e = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     if ground_state is not None:
         h_exact, _, x0_exact, _ = _extract_classical_model_with_exact_fields(
-            spins0,
-            hamiltonian,
-            ground_state,
-            sampled_power=sampled_power,
-            device=device,
+            spins0, hamiltonian, ground_state, sampled_power=sampled_power, device=device,
         )
         # x_with_exact, _, e_with_exact = sa.anneal(
         #     h_exact, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
@@ -372,6 +387,7 @@ def find_ground_state(config):
                 weights = torch.from_numpy(p[batch_indices]).to(dtype=dtype, device=device)
                 weights /= torch.sum(weights)
         spins = torch.from_numpy(spins.view(np.int64))
+
         optimizer = config.optimizer(config.model)
         scheduler = config.scheduler(optimizer)
         tune_neural_network(
@@ -599,15 +615,15 @@ class ConvModel(torch.nn.Module):
 class DenseModel(torch.nn.Module):
     def __init__(self, shape, number_features, use_batchnorm=True, dropout=None):
         super().__init__()
-        number_blocks = len(number_features)
+        number_features = number_features + [2]
         layers = [torch.nn.Linear(shape[0] * shape[1], number_features[0])]
-        for i in range(1, len(number_channels)):
+        for i in range(1, len(number_features)):
             layers.append(torch.nn.ReLU(inplace=True))
             if use_batchnorm:
                 layers.append(torch.nn.BatchNorm1d(number_features[i - 1]))
             if dropout is not None:
                 layers.append(torch.nn.Dropout(p=dropout, inplace=True))
-            layers.append(torch.nn.Linear(widths[i - 1], number_features[i]))
+            layers.append(torch.nn.Linear(number_features[i - 1], number_features[i]))
 
         self.shape = shape
         self.layers = torch.nn.Sequential(*layers)
@@ -761,6 +777,7 @@ def run_triangle_6x6():
     representatives = None
     logger.debug("Hilbert space dimension is {}", basis.number_states)
 
+    torch.use_deterministic_algorithms(True)
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed + 1)
@@ -788,14 +805,15 @@ def run_triangle_6x6():
     # model.load_state_dict(torch.load("runs/symm/triangle_6x6/132/model_1.pt"))
     # model.load_state_dict(torch.load("runs/symm/triangle_6x6/133/model_2.pt"))
 
-
     logger.info(model)
     logger.debug("Contains {} parameters", sum(t.numel() for t in model.parameters()))
 
     # optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=5e-4)
     # scheduler=lambda o: None
-    optimizer=lambda m: torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95)
-    scheduler=lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(o, T_max=args.epochs, eta_min=1e-3)
+    optimizer = lambda m: torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95)
+    scheduler = lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(
+        o, T_max=args.epochs, eta_min=1e-3
+    )
     config = Config(
         model=model,
         ground_state=ground_state,
@@ -838,7 +856,10 @@ def main():
     representatives = None
     logger.info("Hilbert space dimension is {}", basis.number_states)
 
+    torch.use_deterministic_algorithms(True)
     torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
     logger.info("Using seed={}", args.seed)
 
