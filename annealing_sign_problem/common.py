@@ -267,8 +267,11 @@ def extract_classical_ising_model(
 
 def load_ground_state(filename: str):
     with h5py.File(filename, "r") as f:
+        print(f["/hamiltonian/eigenvectors"].shape)
         ground_state = f["/hamiltonian/eigenvectors"][:]
         ground_state = ground_state.squeeze()
+        if ground_state.ndim > 1:
+            ground_state = ground_state[0, :]
         energy = f["/hamiltonian/eigenvalues"][0]
         basis_representatives = f["/basis/representatives"][:]
     return torch.from_numpy(ground_state), energy, basis_representatives
