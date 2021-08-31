@@ -178,8 +178,10 @@ def tune_neural_network(
 
 
 def _extract_classical_model_with_exact_fields(
-    spins, hamiltonian, ground_state, sampled_power, device
+    spins, hamiltonian, ground_state, sampled_power, device=None, scale_field=None
 ):
+    if device is None:
+        device = ground_state.device
     basis = hamiltonian.basis
     log_amplitude = ground_state.abs().log().unsqueeze(dim=1)
     log_sign = torch.where(
@@ -199,7 +201,8 @@ def _extract_classical_model_with_exact_fields(
         return torch.complex(a, b)
 
     return extract_classical_ising_model(
-        spins, hamiltonian, log_coeff_fn, sampled_power=sampled_power, device=device,
+        spins, hamiltonian, log_coeff_fn, sampled_power=sampled_power,
+        device=device, scale_field=scale_field
     )
 
 
@@ -310,6 +313,75 @@ def _make_log_amplitude_fn(amplitude, basis, device, dtype):
         return log_amplitude[indices]
 
     return log_coeff_fn
+
+
+def test_simulated_annealing_on_patches(
+    hamiltonian,
+    ground_state,
+    sampled_power,
+    number_sweeps,
+    number_monte_carlo_samples,
+    number_outer_iterations,
+):
+    basis = hamiltonian.basis
+
+    with torch.no_grad():
+        p = ground_state.abs() ** sampled_power
+        p = p.numpy()
+        p /= np.sum(p)
+
+    logger.info("Using {} Monte Carlo samples...", number_monte_carlo_samples)
+    for i in range(number_outer_iterations):
+        logger.info("Experiment #{}...", i + 1)
+        batch_indices = np.random.choice(
+            basis.number_states, size=number_monte_carlo_samples, replace=True, p=p
+        )
+
+        spins0 = basis.states[batch_indices]
+        h_exact, spins, x_exact, counts = _extract_classical_model_with_exact_fields(
+            spins0, hamiltonian, ground_state, sampled_power=sampled_power
+        )
+        h, _, _, _ = _extract_classical_model_with_exact_fields(
+            spins0, hamiltonian, ground_state, sampled_power=sampled_power, scale_field=0
+        )
+        x_from_exact, _, e_from_exact = sa.anneal(h_exact, x0=None, number_sweeps=number_sweeps)
+        x, _, e = sa.anneal(h, x0=None, number_sweeps=number_sweeps)
+
+        def extract_signs(bits):
+            i = np.arange(spins.shape[0], dtype=np.uint64)
+            signs = (bits[i // 64] >> (i % 64)) & 1
+            signs = 1 - signs
+            signs = torch.from_numpy(signs.view(np.int64))
+            return signs
+
+        signs = extract_signs(x)
+        signs_exact = extract_signs(x_exact)
+        signs_from_exact = extract_signs(x_from_exact)
+        counts = torch.from_numpy(counts)
+
+        accuracy = torch.sum(signs_exact == signs).float() / spins.shape[0]
+        weighted_accuracy = torch.dot((signs_exact == signs).float(), counts.float()) / torch.sum(
+            counts
+        )
+        if accuracy < 0.5:
+            accuracy = 1 - accuracy
+            weighted_accuracy = 1 - weighted_accuracy
+
+        accuracy_from_exact = torch.sum(signs_exact == signs_from_exact).float() / spins.shape[0]
+        weighted_accuracy_from_exact = torch.dot(
+            (signs_exact == signs_from_exact).float(), counts.float()
+        ) / torch.sum(counts)
+
+        logger.info(
+            "SA accuracy with exact fields: unweighted={:.4f}, weighted={:.4f}",
+            accuracy_from_exact,
+            weighted_accuracy_from_exact,
+        )
+        logger.info(
+            "SA accuracy with zero  fields: unweighted={:.4f}, weighted={:.4f}",
+            accuracy,
+            weighted_accuracy,
+        )
 
 
 def find_ground_state(config):
@@ -754,6 +826,47 @@ if False:
             return x
 
 
+def run_sa_only():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sweeps", type=int, default=10000, help="Number of SA sweeps.")
+    parser.add_argument("--samples", type=int, default=100000, help="Number MC samples.")
+    parser.add_argument("--iters", type=int, default=1, help="Number experiments.")
+    parser.add_argument("--power", type=float, default=2, help="Power.")
+    parser.add_argument("--seed", type=int, default=None, help="Seed.")
+    args = parser.parse_args()
+
+    ground_state, E, representatives = load_ground_state(
+        # os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.h5")
+        # os.path.join(project_dir(), "data/symm/j1j2_square_6x6_flipped.h5")
+        # os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
+        os.path.join(project_dir(), "data/symm/heisenberg_kagome_36.h5")
+    )
+    basis, hamiltonian = load_basis_and_hamiltonian(
+        # os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.yaml")
+        # os.path.join(project_dir(), "data/symm/j1j2_square_6x6_flipped.yaml")
+        # os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
+        os.path.join(project_dir(), "data/symm/heisenberg_kagome_36.yaml")
+    )
+    basis.build(representatives)
+    representatives = None
+    logger.debug("Hilbert space dimension is {}", basis.number_states)
+
+    torch.use_deterministic_algorithms(True)
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed + 1)
+        logger.debug("Seeding PyTorch and NumPy with seed={}...", args.seed)
+
+    test_simulated_annealing_on_patches(
+        hamiltonian=hamiltonian,
+        ground_state=ground_state,
+        sampled_power=args.power,
+        number_sweeps=args.sweeps,
+        number_monte_carlo_samples=args.samples,
+        number_outer_iterations=args.iters,
+    )
+
+
 def run_triangle_6x6():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sweeps", type=int, default=10000, help="Number of SA sweeps.")
@@ -768,10 +881,14 @@ def run_triangle_6x6():
     args = parser.parse_args()
 
     ground_state, E, representatives = load_ground_state(
-        os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
+        os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.h5")
+        # os.path.join(project_dir(), "data/symm/j1j2_square_6x6_flipped.h5")
+        # os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
     )
     basis, hamiltonian = load_basis_and_hamiltonian(
-        os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
+        os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.yaml")
+        # os.path.join(project_dir(), "data/symm/j1j2_square_6x6_flipped.yaml")
+        # os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
     )
     basis.build(representatives)
     representatives = None
