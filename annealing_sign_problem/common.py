@@ -1,40 +1,47 @@
 import lattice_symmetries as ls
 import ising_glass_annealer as sa
+import unpack_bits
 import torch
 from torch import Tensor
+from torch.utils.tensorboard import SummaryWriter
+from torch.nn.parameter import Parameter  # , UninitializedParameter
 import numpy as np
 import scipy.sparse
-from typing import Optional
+import time
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 from loguru import logger
-from ctypes import CDLL, POINTER, c_int64, c_uint32, c_uint64, c_double
+
+# from ctypes import CDLL, POINTER, c_int64, c_uint32, c_uint64, c_double
 import yaml
 import h5py
 import os
+import _build_matrix
+from _build_matrix import ffi
 
 
-def project_dir():
-    return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+# def project_dir():
+#     return os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 
-_lib = CDLL(os.path.join(project_dir(), "annealing_sign_problem", "libbuild_matrix.so"))
+# _lib = CDLL(os.path.join(project_dir(), "annealing_sign_problem", "libbuild_matrix.so"))
 
 
-def __preprocess_library():
-    # fmt: off
-    info = [
-        ("build_matrix", [c_uint64, POINTER(c_uint64), POINTER(c_int64), POINTER(c_double),
-            POINTER(c_uint64), POINTER(c_double), POINTER(c_int64), POINTER(c_double),
-            POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double), POINTER(c_double)], c_uint64),
-        ("extract_signs", [c_uint64, POINTER(c_double), POINTER(c_uint64)], None),
-    ]
-    # fmt: on
-    for (name, argtypes, restype) in info:
-        f = getattr(_lib, name)
-        f.argtypes = argtypes
-        f.restype = restype
+# def __preprocess_library():
+#     # fmt: off
+#     info = [
+#         ("build_matrix", [c_uint64, POINTER(c_uint64), POINTER(c_int64), POINTER(c_double),
+#             POINTER(c_uint64), POINTER(c_double), POINTER(c_int64), POINTER(c_double),
+#             POINTER(c_uint32), POINTER(c_uint32), POINTER(c_double), POINTER(c_double)], c_uint64),
+#         ("extract_signs", [c_uint64, POINTER(c_double), POINTER(c_uint64)], None),
+#     ]
+#     # fmt: on
+#     for (name, argtypes, restype) in info:
+#         f = getattr(_lib, name)
+#         f.argtypes = argtypes
+#         f.restype = restype
 
 
-__preprocess_library()
+# __preprocess_library()
 
 
 # def _int_to_ls_bits512(x: int, n: int = 8) -> np.ndarray:
@@ -86,6 +93,34 @@ __preprocess_library()
 #     return out_spins, out_coeffs, out_counts
 
 
+def get_device(obj) -> Optional[torch.device]:
+    r = _get_a_var(obj)
+    return r.device if r is not None else None
+
+
+def get_dtype(obj) -> Optional[torch.dtype]:
+    r = _get_a_var(obj)
+    return r.dtype if r is not None else None
+
+
+def _get_a_var(obj):
+    if isinstance(obj, Tensor):
+        return obj
+    if isinstance(obj, torch.nn.Module):
+        for result in obj.parameters():
+            if isinstance(result, Tensor):
+                return result
+    if isinstance(obj, list) or isinstance(obj, tuple):
+        for result in map(get_a_var, obj):
+            if isinstance(result, Tensor):
+                return result
+    if isinstance(obj, dict):
+        for result in map(get_a_var, obj.items()):
+            if isinstance(result, Tensor):
+                return result
+    return None
+
+
 def split_into_batches(xs: Tensor, batch_size: int, device=None):
     r"""Iterate over `xs` in batches of size `batch_size`. If `device` is not `None`, batches are
     moved to `device`.
@@ -135,6 +170,107 @@ def forward_with_batches(f, xs, batch_size: int, device=None) -> Tensor:
     for chunk in split_into_batches(xs, batch_size, device):
         out.append(f(chunk))
     return torch.cat(out, dim=0)
+
+class Unpack(torch.nn.Module):
+    r"""Unpacks spin configurations represented as bits (`uint64_t` or `ls_bits512`) into a
+    2D-tensor of `float32`.
+    """
+    __constants__ = ["number_spins"]
+    number_spins: int
+
+    def __init__(self, number_spins: int):
+        super().__init__()
+        self.number_spins = number_spins
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.dim() == 1:
+            x = x.unsqueeze(dim=1)
+        return unpack_bits.unpack(x, self.number_spins)
+
+    def extra_repr(self) -> str:
+        return "number_spins={}".format(self.number_spins)
+
+
+class TensorIterableDataset(torch.utils.data.IterableDataset):
+    def __init__(self, *tensors, batch_size=1, shuffle=False):
+        assert all(tensors[0].size(0) == tensor.size(0) for tensor in tensors)
+        assert all(tensors[0].device == tensor.device for tensor in tensors)
+        self.tensors = tensors
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    @property
+    def device(self):
+        return self.tensors[0].device
+
+    def __len__(self):
+        return self.tensors[0].size(0)
+
+    def __iter__(self):
+        if self.shuffle:
+            indices = torch.randperm(self.tensors[0].size(0), device=self.device)
+            tensors = tuple(tensor[indices] for tensor in self.tensors)
+        else:
+            tensors = self.tensors
+        return zip(*(torch.split(tensor, self.batch_size) for tensor in tensors))
+
+
+def supervised_loop_once(
+    dataset: Iterable[Tuple[Tensor, Tensor, Tensor]],
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    loss_fn: Callable[[Tensor, Tensor, Tensor], Tensor],
+    scheduler: Optional[Any],
+    swa_model=None,
+    swa_scheduler=None,
+) -> Dict[str, float]:
+    tick = time.time()
+    model.train()
+    total_loss: float = 0.0
+    total_count: int = 0
+    for batch in dataset:
+        (x, y, w) = batch
+        w = w / torch.sum(w)
+        optimizer.zero_grad()
+        ŷ = model(x)
+        loss = loss_fn(ŷ, y, w)
+        loss.backward()
+        optimizer.step()
+        total_loss += x.size(0) * loss.item()
+        total_count += x.size(0)
+    if scheduler is not None:
+        scheduler.step()
+    if swa_model is not None:
+        assert scheduler is None
+        assert swa_scheduler is not None
+        swa_model.update_parameters(model)
+        swa_scheduler.step()
+    tock = time.time()
+    return {"loss": total_loss / total_count, "time": tock - tick}
+
+
+@torch.no_grad()
+def compute_average_loss(dataset, model, loss_fn, accuracy_fn):
+    tick = time.time()
+    model.eval()
+    total_loss = 0
+    total_sum = 0
+    total_count = 0
+    for batch in dataset:
+        (x, y, w) = batch
+        w = w / torch.sum(w)
+        ŷ = model(x)
+        loss = loss_fn(ŷ, y, w)
+        accuracy = accuracy_fn(ŷ, y, w)
+        total_loss += x.size(0) * loss.item()
+        total_sum += x.size(0) * accuracy.item()
+        total_count += x.size(0)
+    tock = time.time()
+    return {
+        "loss": total_loss / total_count,
+        "accuracy": total_sum / total_count,
+        "time": tock - tick,
+    }
 
 
 def extract_classical_ising_model(
@@ -207,19 +343,37 @@ def extract_classical_ising_model(
     row_indices = np.empty(other_spins.shape[0], dtype=np.uint32)
     col_indices = np.empty(other_spins.shape[0], dtype=np.uint32)
     elements = np.empty(other_spins.shape[0], dtype=np.float64)
-    written = _lib.build_matrix(
+    # uint64_t build_matrix(
+    #     uint64_t num_spins, ls_bits512 const spins[],
+    #     int64_t const * counts, double const * psi,
+    #     ls_bits512 const * other_spins, double const * other_coeffs,
+    #     int64_t const * other_counts, double const * other_psi,
+    #     uint32_t * row_indices, uint32_t * col_indices,
+    #     double * elements, double * field);
+    written = _build_matrix.lib.build_matrix(
         spins.shape[0],
-        spins.ctypes.data_as(POINTER(c_uint64)),
-        counts.ctypes.data_as(POINTER(c_int64)),
-        ψs.ctypes.data_as(POINTER(c_double)),
-        other_spins.ctypes.data_as(POINTER(c_uint64)),
-        other_coeffs.ctypes.data_as(POINTER(c_double)),
-        other_counts.ctypes.data_as(POINTER(c_int64)),
-        other_ψs.ctypes.data_as(POINTER(c_double)),
-        row_indices.ctypes.data_as(POINTER(c_uint32)),
-        col_indices.ctypes.data_as(POINTER(c_uint32)),
-        elements.ctypes.data_as(POINTER(c_double)),
-        field.ctypes.data_as(POINTER(c_double)),
+        ffi.from_buffer("ls_bits512 const[]", spins),
+        ffi.from_buffer("int64_t const[]", counts),
+        ffi.from_buffer("double const[]", ψs),
+        ffi.from_buffer("ls_bits512 const[]", other_spins),
+        ffi.from_buffer("double const[]", other_coeffs),
+        ffi.from_buffer("int64_t const[]", other_counts),
+        ffi.from_buffer("double const[]", other_ψs),
+        ffi.from_buffer("uint32_t[]", row_indices),
+        ffi.from_buffer("uint32_t[]", col_indices),
+        ffi.from_buffer("double[]", elements),
+        ffi.from_buffer("double[]", field)
+        # spins.ctypes.data_as(POINTER(c_uint64)),
+        # counts.ctypes.data_as(POINTER(c_int64)),
+        # ψs.ctypes.data_as(POINTER(c_double)),
+        # other_spins.ctypes.data_as(POINTER(c_uint64)),
+        # other_coeffs.ctypes.data_as(POINTER(c_double)),
+        # other_counts.ctypes.data_as(POINTER(c_int64)),
+        # other_ψs.ctypes.data_as(POINTER(c_double)),
+        # row_indices.ctypes.data_as(POINTER(c_uint32)),
+        # col_indices.ctypes.data_as(POINTER(c_uint32)),
+        # elements.ctypes.data_as(POINTER(c_double)),
+        # field.ctypes.data_as(POINTER(c_double)),
     )
     row_indices = row_indices[:written]
     col_indices = col_indices[:written]
@@ -250,8 +404,14 @@ def extract_classical_ising_model(
     # print("Min coupling", matrix.data.min(), np.abs(matrix.data).min())
 
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
-    _lib.extract_signs(
-        spins.shape[0], ψs.ctypes.data_as(POINTER(c_double)), x0.ctypes.data_as(POINTER(c_uint64)),
+    # void extract_signs(
+    #     uint64_t num_spins, double const * psi, uint64_t * signs);
+    _build_matrix.lib.extract_signs(
+        spins.shape[0],
+        ffi.from_buffer("double const[]", ψs),
+        ffi.from_buffer("uint64_t const[]", x0),
+        # ψs.ctypes.data_as(POINTER(c_double)),
+        # x0.ctypes.data_as(POINTER(c_uint64)),
     )
 
     logger.info(
@@ -267,7 +427,6 @@ def extract_classical_ising_model(
 
 def load_ground_state(filename: str):
     with h5py.File(filename, "r") as f:
-        print(f["/hamiltonian/eigenvectors"].shape)
         ground_state = f["/hamiltonian/eigenvectors"][:]
         ground_state = ground_state.squeeze()
         if ground_state.ndim > 1:
@@ -275,6 +434,90 @@ def load_ground_state(filename: str):
         energy = f["/hamiltonian/eigenvalues"][0]
         basis_representatives = f["/basis/representatives"][:]
     return torch.from_numpy(ground_state), energy, basis_representatives
+
+
+# def normalize(mx):
+#     """Row-normalize sparse matrix"""
+#     # scale = torch.diag(mx.sum(dim=1).reciprocal()).to_sparse()
+#     # return torch.mm(scale, mx)
+#     rowsum = np.array(mx.sum(1))
+#     r_inv = np.power(rowsum, -1).flatten()
+#     r_inv[np.isinf(r_inv)] = 0.0
+#     r_mat_inv = scipy.sparse.diags(r_inv)
+#     mx = r_mat_inv.dot(mx)
+#     return mx
+
+
+# def sparse_mx_to_torch_sparse_tensor(sparse_mx):
+#     """Convert a scipy sparse matrix to a torch sparse tensor."""
+#     sparse_mx = sparse_mx.tocoo().astype(np.float32)
+#     indices = torch.from_numpy(np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64))
+#     values = torch.from_numpy(sparse_mx.data)
+#     shape = torch.Size(sparse_mx.shape)
+#     return torch.sparse.FloatTensor(indices, values, shape)
+
+
+# def load_graph(filename: str):
+#     with open(filename, "r") as f:
+#         config = yaml.load(f, Loader=yaml.SafeLoader)
+#     n = config["basis"]["number_spins"]
+#     edges = np.array(config["hamiltonian"]["terms"][0]["sites"])
+#     edges = torch.from_numpy(edges)
+#     edges = torch.cat([edges, torch.stack([edges[:, 1], edges[:, 0]], dim=1)], dim=0)
+#     edges = edges.t().contiguous()
+#     return edges
+#     # adj = torch.diag()
+#     # print(adj)
+#     # adj = torch.zeros((n, n))
+#     edges = []
+#     for i in range(n):
+#         for j in range(n):
+#             if i != j:
+#                 edges.append((i, j))
+#         # x = i % 6
+#         # y = i // 6
+#         # edges.append((i, (x - 2 + 6) % 6 + ((y + 2) % 6) * 6))
+#         # edges.append((i, (x - 1 + 6) % 6 + ((y + 2) % 6) * 6))
+#         # edges.append((i, (x - 0 + 6) % 6 + ((y + 2) % 6) * 6))
+# 
+#         # edges.append((i, (x - 2 + 6) % 6 + ((y + 1) % 6) * 6))
+#         # edges.append((i, (x - 1 + 6) % 6 + ((y + 1) % 6) * 6))
+#         # edges.append((i, (x - 0 + 6) % 6 + ((y + 1) % 6) * 6))
+#         # edges.append((i, (x + 1 + 6) % 6 + ((y + 1) % 6) * 6))
+# 
+#         # edges.append((i, (x - 2 + 6) % 6 + ((y + 0) % 6) * 6))
+#         # edges.append((i, (x - 1 + 6) % 6 + ((y + 0) % 6) * 6))
+#         # # edges.append((i, (x - 0 + 6) % 6 + ((y + 0) % 6) * 6))
+#         # edges.append((i, (x + 1 + 6) % 6 + ((y + 0) % 6) * 6))
+#         # edges.append((i, (x + 2 + 6) % 6 + ((y + 0) % 6) * 6))
+# 
+#         # edges.append((i, (x - 1 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
+#         # edges.append((i, (x - 0 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
+#         # edges.append((i, (x + 1 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
+#         # edges.append((i, (x + 2 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
+# 
+#         # edges.append((i, (x - 0 + 6) % 6 + ((y - 2 + 6) % 6) * 6))
+#         # edges.append((i, (x + 1 + 6) % 6 + ((y - 2 + 6) % 6) * 6))
+#         # edges.append((i, (x + 2 + 6) % 6 + ((y - 2 + 6) % 6) * 6))
+# 
+#     adj = torch.zeros((n, n))
+#     for i in range(len(edges)):
+#         adj[edges[i][0], edges[i][1]] = 1
+#     # adj = adj + adj.t() + torch.eye(n)
+#     print(adj.sum(dim=1))
+#     assert torch.all(adj == adj.t())
+#     return adj
+#     # edges = torch.cat([edges, torch.stack([edges[:, 1], edges[:, 0]], dim=1)], dim=0).to(torch.long)
+#     # return edges.t().contiguous()
+#     # return torch.from_numpy(edges.T).contiguous().to(torch.long)
+#     adj = scipy.sparse.coo_matrix(
+#         (np.ones(edges.shape[0]), (edges[:, 0], edges[:, 1])), shape=(n, n)
+#     )
+#     adj = adj + adj.T + scipy.sparse.eye(n)
+#     adj = normalize(adj).tocoo().astype(np.float32)
+#     return torch.sparse_coo_tensor(
+#         torch.from_numpy(np.vstack((adj.row, adj.col))), torch.from_numpy(adj.data), (n, n)
+#     ).coalesce()
 
 
 def load_basis_and_hamiltonian(filename: str):

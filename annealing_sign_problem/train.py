@@ -1,96 +1,26 @@
 import argparse
 from .common import *
+from .models import *
 import ctypes
 from collections import namedtuple
 from typing import Tuple
 import lattice_symmetries as ls
-import nqs_playground as nqs
-from nqs_playground.core import _get_dtype, _get_device
+
+# import nqs_playground as nqs
+# from nqs_playground.core import _get_dtype, _get_device
+import math
 import torch
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
+from torch.nn.parameter import Parameter  # , UninitializedParameter
+
+# from torch_geometric.nn import DenseGCNConv, GCNConv, ChebConv
 from typing import Optional
 import time
 from loguru import logger
 import sys
 import numpy as np
 import concurrent.futures
-
-
-class TensorIterableDataset(torch.utils.data.IterableDataset):
-    def __init__(self, *tensors, batch_size=1, shuffle=False):
-        assert all(tensors[0].size(0) == tensor.size(0) for tensor in tensors)
-        assert all(tensors[0].device == tensor.device for tensor in tensors)
-        self.tensors = tensors
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-
-    @property
-    def device(self):
-        return self.tensors[0].device
-
-    def __len__(self):
-        return self.tensors[0].size(0)
-
-    def __iter__(self):
-        if self.shuffle:
-            indices = torch.randperm(self.tensors[0].size(0), device=self.device)
-            tensors = tuple(tensor[indices] for tensor in self.tensors)
-        else:
-            tensors = self.tensors
-        return zip(*(torch.split(tensor, self.batch_size) for tensor in tensors))
-
-
-def supervised_loop_once(
-    dataset, model, optimizer, scheduler, loss_fn, swa_model=None, swa_scheduler=None
-):
-    tick = time.time()
-    model.train()
-    total_loss = 0
-    total_count = 0
-    for batch in dataset:
-        (x, y, w) = batch
-        w = w / torch.sum(w)
-        optimizer.zero_grad()
-        ŷ = model(x)
-        loss = loss_fn(ŷ, y, w)
-        loss.backward()
-        optimizer.step()
-        total_loss += x.size(0) * loss.item()
-        total_count += x.size(0)
-    if scheduler is not None:
-        scheduler.step()
-    if swa_model is not None:
-        assert scheduler is None
-        assert swa_scheduler is not None
-        swa_model.update_parameters(model)
-        swa_scheduler.step()
-    tock = time.time()
-    return {"loss": total_loss / total_count, "time": tock - tick}
-
-
-@torch.no_grad()
-def compute_average_loss(dataset, model, loss_fn, accuracy_fn):
-    tick = time.time()
-    model.eval()
-    total_loss = 0
-    total_sum = 0
-    total_count = 0
-    for batch in dataset:
-        (x, y, w) = batch
-        w = w / torch.sum(w)
-        ŷ = model(x)
-        loss = loss_fn(ŷ, y, w)
-        accuracy = accuracy_fn(ŷ, y, w)
-        total_loss += x.size(0) * loss.item()
-        total_sum += x.size(0) * accuracy.item()
-        total_count += x.size(0)
-    tock = time.time()
-    return {
-        "loss": total_loss / total_count,
-        "accuracy": total_sum / total_count,
-        "time": tock - tick,
-    }
 
 
 def prepare_datasets(
@@ -124,57 +54,106 @@ def default_on_epoch_end(epoch, epochs, loss, accuracy=None):
 
 def tune_neural_network(
     model: torch.nn.Module,
-    spins: Tensor,
-    target_signs: Tensor,
-    weights: Optional[Tensor],
+    train_data: Tuple[Tensor, Tensor, Tensor],
     optimizer: torch.optim.Optimizer,
     scheduler,
     epochs: int,
     batch_size: int,
+    swa_lr: Optional[float] = None,
+    swa_epochs: int = 0,
     on_epoch_end=default_on_epoch_end,
-):
-    logger.info("Starting supervised training...")
-    dtype = _get_dtype(model)
-    device = _get_device(model)
-    train_dataset, test_dataset = prepare_datasets(
-        spins, target_signs, weights, device=device, dtype=dtype, train_batch_size=batch_size
-    )
-    logger.info("Training dataset contains {} samples", spins.size(0))
+) -> None:
+    logger.debug("Starting supervised training...")
+    dtype = get_dtype(model)
+    device = get_device(model)
+    train_dataset = TensorIterableDataset(*train_data, batch_size=batch_size, shuffle=True)
+    test_dataset = TensorIterableDataset(*train_data, batch_size=16384, shuffle=False)
+    logger.debug("Training dataset contains {} samples", train_data[0].size(0))
 
-    def loss_fn(ŷ, y, w):
+    def loss_fn(ŷ: Tensor, y: Tensor, w: Tensor) -> Tensor:
         """Weighted Cross Entropy"""
         r = torch.nn.functional.cross_entropy(ŷ, y, reduction="none")
         return torch.dot(r, w)
 
     @torch.no_grad()
-    def accuracy_fn(ŷ, y, w):
+    def accuracy_fn(ŷ: Tensor, y: Tensor, w: Tensor) -> Tensor:
         r = (ŷ.argmax(dim=1) == y).to(w.dtype)
         return torch.dot(r, w)
 
-    use_swa = True
-
-    if use_swa:
+    if swa_epochs > 0:
+        assert swa_lr is not None
         swa_model = torch.optim.swa_utils.AveragedModel(model)
-        swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=4e-3)
+        swa_scheduler = torch.optim.swa_utils.SWALR(optimizer, swa_lr=swa_lr)
 
     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
     on_epoch_end(0, epochs, info["loss"], info["accuracy"])
-    for epoch in range(epochs):
-        if use_swa and epoch >= epochs - 50:
-            info = supervised_loop_once(
-                train_dataset, model, optimizer, None, loss_fn, swa_model, swa_scheduler
-            )
-        else:
-            info = supervised_loop_once(train_dataset, model, optimizer, scheduler, loss_fn)
+    # Normal training
+    for epoch in range(epochs - swa_epochs):
+        info = supervised_loop_once(
+            train_dataset,
+            model,
+            optimizer,
+            loss_fn,
+            scheduler=scheduler,
+            swa_model=None,
+            swa_scheduler=None,
+        )
+        if epoch != epochs - swa_epochs - 1:
+            on_epoch_end(epoch + 1, epochs, info["loss"])
+    # Stochastic weight averaging to improve generalization
+    for epoch in range(epochs - swa_epochs, epochs):
+        info = supervised_loop_once(
+            train_dataset,
+            model,
+            optimizer,
+            loss_fn,
+            scheduler=None,
+            swa_model=swa_model,
+            swa_scheduler=swa_scheduler,
+        )
         if epoch != epochs - 1:
             on_epoch_end(epoch + 1, epochs, info["loss"])
-
-    if use_swa:
+    if swa_epochs > 0:
         torch.optim.swa_utils.update_bn(train_dataset, swa_model)
         model.load_state_dict(swa_model.module.state_dict())
 
     info = compute_average_loss(test_dataset, model, loss_fn, accuracy_fn)
     on_epoch_end(epochs, epochs, info["loss"], info["accuracy"])
+
+
+@torch.no_grad()
+def make_sampler(basis: ls.SpinBasis, ground_state: Tensor) -> Callable[[], Tuple[Tensor, Tensor]]:
+    weights = ground_state.to(torch.float64).abs() ** 2
+    weights /= torch.sum(weights)
+    spins = torch.from_numpy(basis.states.view(np.int64)).to(weights.device)
+    assert weights.size() == spins.size()
+
+    class Sampler(torch.nn.Module):
+        spins: Tensor
+        weights: Tensor
+
+        def __init__(self, spins: Tensor, weights: Tensor) -> None:
+            super().__init__()
+            self.spins = spins
+            self.weights = weights
+
+        @torch.no_grad()
+        def forward(self, number_samples: int) -> Tuple[Tensor, Tensor]:
+            if self.weights.numel() > 2 ** 24:
+                cpu_indices = np.random.choice(
+                    self.weights.numel(),
+                    size=number_samples,
+                    replace=True,
+                    p=self.weights.cpu().numpy(),
+                )
+                indices = torch.from_numpy(cpu_indices).to(self.weights.device)
+            else:
+                indices = torch.multinomial(
+                    self.weights, num_samples=number_samples, replacement=True
+                )
+            return self.spins[indices], self.weights[indices]
+
+    return Sampler(spins, weights)
 
 
 def _extract_classical_model_with_exact_fields(
@@ -201,9 +180,43 @@ def _extract_classical_model_with_exact_fields(
         return torch.complex(a, b)
 
     return extract_classical_ising_model(
-        spins, hamiltonian, log_coeff_fn, sampled_power=sampled_power,
-        device=device, scale_field=scale_field
+        spins,
+        hamiltonian,
+        log_coeff_fn,
+        sampled_power=sampled_power,
+        device=device,
+        scale_field=scale_field,
     )
+
+
+def optimize_sign_structure(
+    spins: Tensor,
+    weights: Tensor,
+    hamiltonian: ls.Operator,
+    ground_state: Tensor,
+    number_sweeps: int,
+    # seed: Optional[int] = None,
+    beta0: Optional[int] = None,
+    beta1: Optional[int] = None,
+    # sampled_power: Optional[int] = None,
+    scale_field: Optional[float] = None,
+    cheat: bool = True,
+):
+    if cheat:
+        cpu_spins = spins.cpu().numpy().view(np.uint64)
+        # If spins come from Monte Carlo sampling, they might contains duplicates.
+        cpu_spins, cpu_counts = np.unique(cpu_spins, return_counts=True, axis=0)
+        cpu_indices = hamiltonian.basis.batched_index(cpu_spins)
+        spins = torch.from_numpy(cpu_spins.view(np.int64)).to(spins.device)
+        indices = torch.from_numpy(cpu_indices.view(np.int64)).to(spins.device)
+        signs = torch.where(
+            ground_state[indices] >= 0,
+            torch.scalar_tensor(0, dtype=torch.int64, device=spins.device),
+            torch.scalar_tensor(1, dtype=torch.int64, device=spins.device),
+        )
+        counts = torch.from_numpy(cpu_counts).to(spins.device)
+        return spins, signs, counts
+    assert False
 
 
 def tune_sign_structure(
@@ -706,6 +719,72 @@ class DenseModel(torch.nn.Module):
         return self.layers(x)
 
 
+class GraphConvolution(torch.nn.Module):
+    """
+    Simple GCN layer, similar to https://arxiv.org/abs/1609.02907
+    """
+
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.empty(in_features, out_features))
+        if bias:
+            self.bias = Parameter(torch.empty(out_features))
+        else:
+            self.register_parameter("bias", None)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1.0 / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+        if self.bias is not None:
+            self.bias.data.uniform_(-stdv, stdv)
+
+    def forward(self, input, adj):
+        support = torch.matmul(input, self.weight)
+        output = torch.matmul(adj, support)
+        if self.bias is not None:
+            return output + self.bias
+        else:
+            return output
+
+    def extra_repr(self) -> str:
+        return "in_features={}, out_features={}, bias={}".format(
+            self.in_features, self.out_features, self.bias is not None
+        )
+
+
+class GraphModel(torch.nn.Module):
+    def __init__(self, graph, number_features):
+        super().__init__()
+        self.adj = graph
+        assert torch.all(self.adj >= 0) and torch.all(self.adj < 36)
+        self.gc1 = ChebConv(1, number_features, 4)
+        # self.dense1 = torch.nn.Linear(36, number_features * 36)
+        self.gc2 = ChebConv(number_features, number_features, 4)
+        # self.gc3 = GCNConv(number_features, number_features)
+        # self.gc4 = GCNConv(number_features, number_features)
+        self.tail = torch.nn.Linear(number_features * 36, 2)
+
+    def forward(self, x):
+        assert x.dim() == 1 or x.dim() == 2 and x.size(1) == 8
+        x = nqs.unpack(x, 36)
+        assert x.dim() == 2 and x.size(1) == 36
+        x = x.view(x.size(0), x.size(1), 1)
+        # print(x.size())
+        x = self.gc1(x, self.adj)
+        x = torch.nn.functional.relu(x)
+        x = self.gc2(x, self.adj)
+        x = torch.nn.functional.relu(x)
+        # x = self.gc3(x, self.adj)
+        # x = torch.nn.functional.relu(x)
+        # x = self.gc4(x, self.adj)
+        # x = torch.nn.functional.relu(x)
+        x = self.tail(x.view(x.size(0), -1))
+        return x
+
+
 if False:
 
     def checkerboard(shape):
@@ -881,20 +960,24 @@ def run_triangle_6x6():
     args = parser.parse_args()
 
     ground_state, E, representatives = load_ground_state(
-        os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.h5")
+        # os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.h5")
         # os.path.join(project_dir(), "data/symm/j1j2_square_6x6_flipped.h5")
-        # os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
+        os.path.join(project_dir(), "data/symm/triangle_6x6.h5")
     )
     basis, hamiltonian = load_basis_and_hamiltonian(
-        os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.yaml")
+        # os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.yaml")
         # os.path.join(project_dir(), "data/symm/j1j2_square_6x6_flipped.yaml")
-        # os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
+        os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
+    )
+    graph = load_graph(
+        # os.path.join(project_dir(), "data/symm/j1j2_triangle_6x6.yaml")
+        os.path.join(project_dir(), "data/symm/triangle_6x6.yaml")
     )
     basis.build(representatives)
     representatives = None
     logger.debug("Hilbert space dimension is {}", basis.number_states)
 
-    torch.use_deterministic_algorithms(True)
+    # torch.use_deterministic_algorithms(True)
     if args.seed is not None:
         torch.manual_seed(args.seed)
         np.random.seed(args.seed + 1)
@@ -912,6 +995,7 @@ def run_triangle_6x6():
         kernel_size = 4
     # model = DenseModel((6, 6), number_features=widths, use_batchnorm=True).to(device)
     model = ConvModel((6, 6), number_channels=widths, kernel_size=kernel_size).to(device)
+    # model = GraphModel(graph.to(device), number_features=128).to(device)
     # model.load_state_dict(torch.load("runs/symm/triangle_6x6/126/model_10.pt"))
 
     # [64, 64, 64] with kernel_size=4
@@ -925,12 +1009,12 @@ def run_triangle_6x6():
     logger.info(model)
     logger.debug("Contains {} parameters", sum(t.numel() for t in model.parameters()))
 
-    # optimizer=lambda m: torch.optim.AdamW(model.parameters(), lr=5e-4)
-    # scheduler=lambda o: None
-    optimizer = lambda m: torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95)
-    scheduler = lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(
-        o, T_max=args.epochs, eta_min=1e-3
-    )
+    optimizer = lambda m: torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = lambda o: None
+    # optimizer = lambda m: torch.optim.SGD(model.parameters(), lr=2e-2, momentum=0.95)
+    # scheduler = lambda o: torch.optim.lr_scheduler.CosineAnnealingLR(
+    #     o, T_max=args.epochs, eta_min=1e-3
+    # )
     config = Config(
         model=model,
         ground_state=ground_state,
@@ -1044,3 +1128,316 @@ def main():
     os.makedirs(config.output, exists_ok=True)
     # supervised_learning_test(config)
     find_ground_state(config)
+
+
+def load_input_files(prefix: str) -> [ls.Operator, Tensor]:
+    ground_state, ground_state_energy, representatives = load_ground_state(prefix + ".h5")
+    basis, hamiltonian = load_basis_and_hamiltonian(prefix + ".yaml")
+    basis.build(representatives)
+    representatives = None
+    logger.info("Hilbert space dimension is {}", hamiltonian.basis.number_states)
+    logger.info("Ground state energy is {}", ground_state_energy)
+    return hamiltonian, ground_state
+
+
+def make_deterministic(seed: Optional[int]) -> None:
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.use_deterministic_algorithms(True)
+    if seed is None:
+        seed = torch.randint(1 << 31, (1,)).item()
+    torch.manual_seed(seed)
+    np.random.seed(seed + 1)
+    logger.debug("Seeding PyTorch and NumPy with seed={}...", seed)
+
+
+@torch.no_grad()
+def compute_metrics_on_full_space(
+    basis: ls.SpinBasis, ground_state: Tensor, model: torch.nn.Module, batch_size: int = 16384
+) -> Dict[str, float]:
+    model.eval()
+    device = get_device(model)
+    spins = torch.from_numpy(basis.states.view(np.int64))
+    accuracy: float = 0.0
+    overlap: float = 0.0
+    for (spins_chunk, ground_state_chunk) in split_into_batches(
+        (spins, ground_state), batch_size=batch_size, device=device
+    ):
+        predicted_sign_structure = model(spins_chunk).argmax(dim=1)
+        correct_sign_structure = torch.where(
+            ground_state_chunk >= 0,
+            torch.scalar_tensor(0, dtype=torch.int64, device=device),
+            torch.scalar_tensor(1, dtype=torch.int64, device=device),
+        )
+        mask = correct_sign_structure == predicted_sign_structure
+        accuracy += torch.sum(mask, dim=0).item()
+        overlap += torch.dot(
+            2 * mask.to(ground_state_chunk.dtype) - 1, ground_state_chunk ** 2
+        ).item()
+    accuracy /= spins.size(0)
+    return {"accuracy": accuracy, "overlap": overlap}
+
+
+# NOTE: generated automatically, do not modify
+KAGOME_12_ADJ = [
+    (0, torch.tensor([6, 5, 9, 10, 7, 8, 11, 0, 11, 1, 2, 3, 4, 5, 6])),
+    (2, torch.tensor([8, 9, 10, 11, 0, 3, 4, 1, 2, 3, 6, 5, 10, 7, 8])),
+    (1, torch.tensor([9, 10, 7, 11, 0, 4, 1, 2, 3, 4, 5, 6, 7, 8, 9])),
+    (2, torch.tensor([10, 7, 8, 0, 11, 1, 2, 3, 4, 1, 5, 6, 8, 9, 10])),
+    (1, torch.tensor([7, 8, 9, 0, 11, 2, 3, 4, 1, 2, 6, 5, 9, 10, 7])),
+    (0, torch.tensor([11, 0, 4, 1, 2, 3, 6, 5, 6, 10, 7, 8, 9, 0, 11])),
+    (0, torch.tensor([0, 11, 2, 3, 4, 1, 5, 6, 5, 8, 9, 10, 7, 11, 0])),
+    (1, torch.tensor([4, 1, 2, 6, 5, 9, 10, 7, 8, 9, 0, 11, 2, 3, 4])),
+    (2, torch.tensor([1, 2, 3, 5, 6, 10, 7, 8, 9, 10, 0, 11, 3, 4, 1])),
+    (1, torch.tensor([2, 3, 4, 5, 6, 7, 8, 9, 10, 7, 11, 0, 4, 1, 2])),
+    (2, torch.tensor([3, 4, 1, 6, 5, 8, 9, 10, 7, 8, 11, 0, 1, 2, 3])),
+    (0, torch.tensor([5, 6, 7, 8, 9, 10, 0, 11, 0, 3, 4, 1, 2, 6, 5])),
+]
+
+# NOTE: generated automatically, do not modify
+KAGOME_36_ADJ = [
+    (0, torch.tensor([28, 29, 31, 32, 33, 34, 35, 0, 16, 3, 4, 5, 20, 7, 8])),
+    (2, torch.tensor([14, 15, 30, 19, 35, 25, 26, 1, 2, 3, 29, 6, 34, 9, 10])),
+    (1, torch.tensor([15, 30, 31, 19, 35, 26, 1, 2, 3, 4, 6, 7, 9, 10, 11])),
+    (2, torch.tensor([30, 31, 32, 35, 0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12])),
+    (1, torch.tensor([31, 32, 33, 35, 0, 2, 3, 4, 5, 20, 7, 8, 11, 12, 13])),
+    (2, torch.tensor([32, 33, 34, 0, 16, 3, 4, 5, 20, 21, 7, 8, 12, 13, 14])),
+    (0, torch.tensor([19, 35, 26, 1, 2, 3, 29, 6, 7, 34, 9, 10, 11, 16, 17])),
+    (0, torch.tensor([35, 0, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 17, 18])),
+    (0, torch.tensor([0, 16, 4, 5, 20, 21, 7, 8, 27, 12, 13, 14, 15, 18, 19])),
+    (1, torch.tensor([26, 1, 2, 29, 6, 33, 34, 9, 10, 11, 16, 17, 20, 21, 22])),
+    (2, torch.tensor([1, 2, 3, 6, 7, 34, 9, 10, 11, 12, 16, 17, 21, 22, 23])),
+    (1, torch.tensor([2, 3, 4, 6, 7, 9, 10, 11, 12, 13, 17, 18, 22, 23, 24])),
+    (2, torch.tensor([3, 4, 5, 7, 8, 10, 11, 12, 13, 14, 17, 18, 23, 24, 25])),
+    (1, torch.tensor([4, 5, 20, 7, 8, 11, 12, 13, 14, 15, 18, 19, 24, 25, 26])),
+    (2, torch.tensor([5, 20, 21, 8, 27, 12, 13, 14, 15, 30, 18, 19, 25, 26, 1])),
+    (1, torch.tensor([20, 21, 22, 8, 27, 13, 14, 15, 30, 31, 19, 35, 26, 1, 2])),
+    (0, torch.tensor([29, 6, 33, 34, 9, 10, 0, 16, 17, 5, 20, 21, 22, 8, 27])),
+    (0, torch.tensor([6, 7, 9, 10, 11, 12, 16, 17, 18, 21, 22, 23, 24, 27, 28])),
+    (0, torch.tensor([7, 8, 11, 12, 13, 14, 17, 18, 19, 23, 24, 25, 26, 28, 29])),
+    (0, torch.tensor([8, 27, 13, 14, 15, 30, 18, 19, 35, 25, 26, 1, 2, 29, 6])),
+    (1, torch.tensor([33, 34, 9, 0, 16, 4, 5, 20, 21, 22, 8, 27, 13, 14, 15])),
+    (2, torch.tensor([34, 9, 10, 16, 17, 5, 20, 21, 22, 23, 8, 27, 14, 15, 30])),
+    (1, torch.tensor([9, 10, 11, 16, 17, 20, 21, 22, 23, 24, 27, 28, 15, 30, 31])),
+    (2, torch.tensor([10, 11, 12, 17, 18, 21, 22, 23, 24, 25, 27, 28, 30, 31, 32])),
+    (1, torch.tensor([11, 12, 13, 17, 18, 22, 23, 24, 25, 26, 28, 29, 31, 32, 33])),
+    (2, torch.tensor([12, 13, 14, 18, 19, 23, 24, 25, 26, 1, 28, 29, 32, 33, 34])),
+    (1, torch.tensor([13, 14, 15, 18, 19, 24, 25, 26, 1, 2, 29, 6, 33, 34, 9])),
+    (0, torch.tensor([16, 17, 20, 21, 22, 23, 8, 27, 28, 14, 15, 30, 31, 19, 35])),
+    (0, torch.tensor([17, 18, 22, 23, 24, 25, 27, 28, 29, 30, 31, 32, 33, 35, 0])),
+    (0, torch.tensor([18, 19, 24, 25, 26, 1, 28, 29, 6, 32, 33, 34, 9, 0, 16])),
+    (2, torch.tensor([21, 22, 23, 27, 28, 14, 15, 30, 31, 32, 19, 35, 1, 2, 3])),
+    (1, torch.tensor([22, 23, 24, 27, 28, 15, 30, 31, 32, 33, 35, 0, 2, 3, 4])),
+    (2, torch.tensor([23, 24, 25, 28, 29, 30, 31, 32, 33, 34, 35, 0, 3, 4, 5])),
+    (1, torch.tensor([24, 25, 26, 28, 29, 31, 32, 33, 34, 9, 0, 16, 4, 5, 20])),
+    (2, torch.tensor([25, 26, 1, 29, 6, 32, 33, 34, 9, 10, 0, 16, 5, 20, 21])),
+    (0, torch.tensor([27, 28, 15, 30, 31, 32, 19, 35, 0, 1, 2, 3, 4, 6, 7])),
+]
+
+def adj_to_device(adj, device):
+    return [(i, t.to(device)) for (i, t) in adj]
+
+
+class KagomeSignNetwork(torch.nn.Module):
+    def __init__(self, number_spins: int, device):
+        super().__init__()
+        if number_spins == 12:
+            self.adj = KAGOME_12_ADJ
+        elif number_spins == 36:
+            self.adj = KAGOME_36_ADJ
+        self.adj = adj_to_device(self.adj, device)
+        self.number_spins = number_spins
+        self.sublattices = max(map(lambda t: t[0], self.adj)) + 1
+        assert self.sublattices == 3
+        channels = 16 # 32
+        self.layers = torch.nn.Sequential(
+            LatticeConvolution(1, channels, self.adj),
+            torch.nn.ReLU(),
+            LatticeConvolution(channels, channels, self.adj),
+            torch.nn.ReLU(),
+            LatticeConvolution(channels, channels, self.adj),
+            torch.nn.ReLU(),
+            # LatticeConvolution(64, 64, self.adj),
+            # torch.nn.ReLU()
+        )
+        self.reduction = [
+            torch.tensor([i for i in range(self.number_spins) if self.adj[i][0] == t])
+            for t in range(self.sublattices)
+        ]
+        self.tail = torch.nn.Linear(channels * self.number_spins, 2)
+
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(dim=1)
+        x = unpack_bits.unpack(x, self.number_spins).unsqueeze(dim=1)
+        x = self.layers(x)
+        # x = torch.nn.functional.relu(x)
+        # x = self.layer2(x)
+        # x = torch.nn.functional.relu(x)
+        # x0 = x[..., [2, 4, 7, 9]].sum(dim=2)
+        # x1 = x[..., [0, 5, 6, 11]].sum(dim=2)
+        # x2 = x[..., [1, 3, 8, 10]].sum(dim=2)
+        # x = torch.stack([x[..., indices].mean(dim=2) for indices in self.reduction], dim=2)
+        x = x.view(x.size(0), -1)
+        return self.tail(x)
+
+
+def kagome_12_supervised():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default="../data/no_symm/autogen/heisenberg_kagome_12",
+        help="File basename.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Seed.")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device."
+    )
+    args = parser.parse_args()
+    make_deterministic(args.seed)
+    device = torch.device(args.device)
+    logger.debug("The computation will run on {}", device)
+
+    with torch.no_grad():
+        hamiltonian, ground_state = load_input_files(args.prefix)
+        ground_state = ground_state.to(device)
+
+    sampler_fn = make_sampler(hamiltonian.basis, ground_state)
+
+    model = KagomeSignNetwork(12, device).to(device)
+    # model = torch.jit.script(
+    #     torch.nn.Sequential(
+    #         Unpack(12),
+    #         torch.nn.Linear(12, 16),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(16, 16),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(16, 16),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(16, 2),
+    #     )
+    # ).to(device)
+
+    def on_epoch_end(epoch: int, epochs: int, loss: float, _accuracy: Optional[float] = None):
+        if epoch % 50 == 0:
+            info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
+            # tb_writer.add_scalar("loss", loss, epoch)
+            # tb_writer.add_scalar("accuracy", accuracy, epoch)
+            # tb_writer.add_scalar("overlap", overlap, epoch)
+            logger.debug(
+                "[{}/{}]: loss = {}, accuracy = {}, overlap = {}",
+                epoch,
+                epochs,
+                loss,
+                info["accuracy"],
+                info["overlap"],
+            )
+        else:
+            if _accuracy is not None:
+                logger.debug("[{}/{}]: loss = {}, accuracy = {}", epoch, epochs, loss, _accuracy)
+            # tb_writer.add_scalar("loss", loss, epoch)
+
+    info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
+    logger.debug("Accuracy: {}; overlap: {}", info["accuracy"], info["overlap"])
+
+    spins, weights = sampler_fn(5000)
+    spins, signs, counts = optimize_sign_structure(
+        spins, weights, hamiltonian, ground_state, number_sweeps=10000, cheat=True
+    )
+    tune_neural_network(
+        model,
+        (spins, signs, counts),
+        optimizer=torch.optim.SGD(model.parameters(), lr=1e-1),
+        scheduler=None,
+        epochs=5000,
+        batch_size=64,
+        on_epoch_end=on_epoch_end,
+    )
+
+
+def kagome_36_supervised():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--prefix", type=str, default="../data/symm/autogen/heisenberg_kagome_36", help="File basename."
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Seed.")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device."
+    )
+    parser.add_argument("--output", type=str, required=True, help="Output dir.")
+    args = parser.parse_args()
+    make_deterministic(args.seed)
+    device = torch.device(args.device)
+    logger.debug("The computation will run on {}", device)
+
+    with torch.no_grad():
+        hamiltonian, ground_state = load_input_files(args.prefix)
+        basis = hamiltonian.basis
+        ground_state = ground_state.to(device)
+
+    sampler_fn = make_sampler(hamiltonian.basis, ground_state)
+
+    model = KagomeSignNetwork(36, device).to(device)
+    logger.info("Model contains {} parameters", sum(t.numel() for t in model.parameters()))
+    # assert model.layer1.adj[0][1].device == device
+    # model = torch.jit.script(
+    #     torch.nn.Sequential(
+    #         Unpack(basis.number_spins),
+    #         torch.nn.Linear(basis.number_spins, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 512),
+    #         torch.nn.ReLU(),
+    #         torch.nn.Linear(512, 2),
+    #     )
+    # ).to(device)
+    tb_writer = SummaryWriter(log_dir=args.output)
+
+    def on_epoch_end(epoch: int, epochs: int, loss: float, _accuracy: Optional[float] = None):
+        if epoch > 0 and epoch % 50 == 0:
+            info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
+            tb_writer.add_scalar("loss", loss, epoch)
+            tb_writer.add_scalar("accuracy", info["accuracy"], epoch)
+            tb_writer.add_scalar("overlap", info["overlap"], epoch)
+            logger.debug(
+                "[{}/{}]: loss = {}, accuracy = {}, overlap = {}",
+                epoch,
+                epochs,
+                loss,
+                info["accuracy"],
+                info["overlap"],
+            )
+        elif _accuracy is not None:
+            logger.debug("[{}/{}]: loss = {}, accuracy' = {}", epoch, epochs, loss, _accuracy)
+            tb_writer.add_scalar("loss", loss, epoch)
+            tb_writer.add_scalar("train_accuracy", loss, _accuracy)
+        else:
+            logger.debug("[{}/{}]: loss = {}", epoch, epochs, loss)
+            tb_writer.add_scalar("loss", loss, epoch)
+
+    # info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
+    # logger.debug("Accuracy: {}; overlap: {}", info["accuracy"], info["overlap"])
+
+    spins, weights = sampler_fn(100000)
+    spins, signs, counts = optimize_sign_structure(
+        spins, weights, hamiltonian, ground_state, number_sweeps=10000, cheat=True
+    )
+    tune_neural_network(
+        model,
+        (spins, signs, counts),
+        optimizer=torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9),
+        # torch.optim.Adam(model.parameters(), lr=1e-3),
+        scheduler=None,
+        epochs=5000,
+        batch_size=256,
+        on_epoch_end=on_epoch_end,
+    )
