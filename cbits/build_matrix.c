@@ -1,12 +1,8 @@
 #include <math.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-typedef struct ls_bits512 {
-  uint64_t words[8];
-} ls_bits512;
+#include "build_matrix.h"
 
 static int ls_bits512_cmp(void const *_a, void const *_b) {
   ls_bits512 const *const a = _a;
