@@ -1248,7 +1248,7 @@ class KagomeSignNetwork(torch.nn.Module):
         self.number_spins = number_spins
         self.sublattices = max(map(lambda t: t[0], self.adj)) + 1
         assert self.sublattices == 3
-        channels = 16 # 32
+        channels = 8 # 32
         self.layers = torch.nn.Sequential(
             LatticeConvolution(1, channels, self.adj),
             torch.nn.ReLU(),
@@ -1256,8 +1256,10 @@ class KagomeSignNetwork(torch.nn.Module):
             torch.nn.ReLU(),
             LatticeConvolution(channels, channels, self.adj),
             torch.nn.ReLU(),
-            # LatticeConvolution(64, 64, self.adj),
-            # torch.nn.ReLU()
+            LatticeConvolution(channels, channels, self.adj),
+            torch.nn.ReLU(),
+            LatticeConvolution(channels, channels, self.adj),
+            torch.nn.ReLU(),
         )
         self.reduction = [
             torch.tensor([i for i in range(self.number_spins) if self.adj[i][0] == t])
@@ -1365,6 +1367,8 @@ def kagome_36_supervised():
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device."
     )
     parser.add_argument("--output", type=str, required=True, help="Output dir.")
+    parser.add_argument("--lr", type=float, default=1e-2, help="Learning rate")
+    parser.add_argument("--momentum", type=float, default=0.8, help="Momentum")
     args = parser.parse_args()
     make_deterministic(args.seed)
     device = torch.device(args.device)
@@ -1434,10 +1438,10 @@ def kagome_36_supervised():
     tune_neural_network(
         model,
         (spins, signs, counts),
-        optimizer=torch.optim.SGD(model.parameters(), lr=1e-2, momentum=0.9),
+        optimizer=torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum),
         # torch.optim.Adam(model.parameters(), lr=1e-3),
         scheduler=None,
-        epochs=5000,
+        epochs=1000,
         batch_size=256,
         on_epoch_end=on_epoch_end,
     )
