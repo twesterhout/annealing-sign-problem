@@ -1,6 +1,7 @@
 name: annealing_gpu
 channels:
   - pytorch
+  - nvidia
   - twesterhout
   - conda-forge
 dependencies:
@@ -12,7 +13,8 @@ dependencies:
       # - grip
     - neovim
   # - cpuonly
-  - cudatoolkit=10.2
+  - cudatoolkit=11.1 # need it for A100
+  # - cudatoolkit=10.2
   - pytorch=1.9.1=*cuda*
   - unpack-bits=*=*cuda*
   - ising-glass-annealer>=0.2.0.1
