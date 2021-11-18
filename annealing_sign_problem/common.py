@@ -284,7 +284,7 @@ def extract_classical_ising_model(
     r"""Map quantum Hamiltonian to classical ising model where wavefunction coefficients are now
     considered spin degrees of freedom.
     """
-    logger.info("Constructing classical Ising model...")
+    logger.debug("Constructing classical Ising model...")
     spins = np.asarray(spins, dtype=np.uint64, order="C")
     if spins.ndim == 1:
         spins = np.hstack([spins.reshape(-1, 1), np.zeros((spins.shape[0], 7), dtype=np.uint64)])
@@ -414,7 +414,7 @@ def extract_classical_ising_model(
         # x0.ctypes.data_as(POINTER(c_uint64)),
     )
 
-    logger.info(
+    logger.debug(
         "Done! The Hamiltonian has dimension {} and contains {} non-zero elements.",
         spins.shape[0],
         written,

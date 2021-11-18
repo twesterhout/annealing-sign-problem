@@ -193,30 +193,66 @@ def optimize_sign_structure(
     spins: Tensor,
     weights: Tensor,
     hamiltonian: ls.Operator,
+    log_coeff_fn: torch.nn.Module,
     ground_state: Tensor,
-    number_sweeps: int,
+    number_sweeps: int = 10000,
     # seed: Optional[int] = None,
     beta0: Optional[int] = None,
     beta1: Optional[int] = None,
     # sampled_power: Optional[int] = None,
     scale_field: Optional[float] = None,
     cheat: bool = True,
-):
+) -> Tuple[Tensor, Tensor, Tensor]:
     if cheat:
         cpu_spins = spins.cpu().numpy().view(np.uint64)
         # If spins come from Monte Carlo sampling, they might contains duplicates.
         cpu_spins, cpu_counts = np.unique(cpu_spins, return_counts=True, axis=0)
-        cpu_indices = hamiltonian.basis.batched_index(cpu_spins)
-        spins = torch.from_numpy(cpu_spins.view(np.int64)).to(spins.device)
+        assert hamiltonian.basis.number_spins <= 64
+        _cpu_spins = cpu_spins[:, 0] if cpu_spins.ndim > 1 else cpu_spins
+        cpu_indices = hamiltonian.basis.batched_index(_cpu_spins)
         indices = torch.from_numpy(cpu_indices.view(np.int64)).to(spins.device)
         signs = torch.where(
             ground_state[indices] >= 0,
             torch.scalar_tensor(0, dtype=torch.int64, device=spins.device),
             torch.scalar_tensor(1, dtype=torch.int64, device=spins.device),
         )
-        counts = torch.from_numpy(cpu_counts).to(spins.device)
-        return spins, signs, counts
-    assert False
+    else:
+        device = spins.device
+        cpu_spins0 = spins.cpu().numpy().view(np.uint64)
+        h, cpu_spins, x0, cpu_counts = extract_classical_ising_model(
+            cpu_spins0,
+            hamiltonian,
+            log_coeff_fn,
+            sampled_power=2,
+            device=device,
+            scale_field=scale_field,
+        )
+        x, _, e = sa.anneal(
+            h,
+            x0,
+            seed=np.random.randint(1 << 31),
+            number_sweeps=number_sweeps,
+            beta0=beta0,
+            beta1=beta1,
+        )
+
+        def extract_signs(bits):
+            i = np.arange(cpu_spins.shape[0], dtype=np.uint64)
+            signs = (bits[i // 64] >> (i % 64)) & 1
+            signs = 1 - signs
+            signs = torch.from_numpy(signs.view(np.int64)).to(device)
+            return signs
+
+        signs = extract_signs(x)
+        signs0 = extract_signs(x0)
+        if False:  # NOTE: disabling for now
+            if torch.sum(signs == signs0).float() / spins.shape[0] < 0.5:
+                logger.warning("Applying global sign flip...")
+                signs = 1 - signs
+
+    spins = torch.from_numpy(cpu_spins.view(np.int64)).to(spins.device)
+    counts = torch.from_numpy(cpu_counts).to(spins.device)
+    return spins, signs, counts
 
 
 def tune_sign_structure(
@@ -244,7 +280,11 @@ def tune_sign_structure(
     x, _, e = sa.anneal(h, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1)
     if ground_state is not None:
         h_exact, _, x0_exact, _ = _extract_classical_model_with_exact_fields(
-            spins0, hamiltonian, ground_state, sampled_power=sampled_power, device=device,
+            spins0,
+            hamiltonian,
+            ground_state,
+            sampled_power=sampled_power,
+            device=device,
         )
         # x_with_exact, _, e_with_exact = sa.anneal(
         #     h_exact, x0, seed=seed, number_sweeps=number_sweeps, beta0=beta0, beta1=beta1
@@ -1233,6 +1273,7 @@ KAGOME_36_ADJ = [
     (0, torch.tensor([27, 28, 15, 30, 31, 32, 19, 35, 0, 1, 2, 3, 4, 6, 7])),
 ]
 
+
 def adj_to_device(adj, device):
     return [(i, t.to(device)) for (i, t) in adj]
 
@@ -1248,24 +1289,22 @@ class KagomeSignNetwork(torch.nn.Module):
         self.number_spins = number_spins
         self.sublattices = max(map(lambda t: t[0], self.adj)) + 1
         assert self.sublattices == 3
-        channels = 8 # 32
+        channels = 32 # 16
         self.layers = torch.nn.Sequential(
             LatticeConvolution(1, channels, self.adj),
-            torch.nn.ReLU(),
+            torch.nn.ReLU(inplace=True),
             LatticeConvolution(channels, channels, self.adj),
-            torch.nn.ReLU(),
+            torch.nn.ReLU(inplace=True),
             LatticeConvolution(channels, channels, self.adj),
-            torch.nn.ReLU(),
+            torch.nn.ReLU(inplace=True),
             LatticeConvolution(channels, channels, self.adj),
-            torch.nn.ReLU(),
-            LatticeConvolution(channels, channels, self.adj),
-            torch.nn.ReLU(),
+            torch.nn.ReLU(inplace=True),
         )
         self.reduction = [
             torch.tensor([i for i in range(self.number_spins) if self.adj[i][0] == t])
             for t in range(self.sublattices)
         ]
-        self.tail = torch.nn.Linear(channels * self.number_spins, 2)
+        self.tail = torch.nn.Linear(channels * self.sublattices, 2)
 
     def forward(self, x):
         if x.dim() == 1:
@@ -1278,7 +1317,7 @@ class KagomeSignNetwork(torch.nn.Module):
         # x0 = x[..., [2, 4, 7, 9]].sum(dim=2)
         # x1 = x[..., [0, 5, 6, 11]].sum(dim=2)
         # x2 = x[..., [1, 3, 8, 10]].sum(dim=2)
-        # x = torch.stack([x[..., indices].mean(dim=2) for indices in self.reduction], dim=2)
+        x = torch.stack([x[..., indices].mean(dim=2) for indices in self.reduction], dim=2)
         x = x.view(x.size(0), -1)
         return self.tail(x)
 
@@ -1351,16 +1390,28 @@ def kagome_12_supervised():
         (spins, signs, counts),
         optimizer=torch.optim.SGD(model.parameters(), lr=1e-1),
         scheduler=None,
-        epochs=5000,
+        epochs=300,
         batch_size=64,
         on_epoch_end=on_epoch_end,
     )
 
 
+def compute_total_weight(spins, basis, ground_state):
+    if spins.ndim > 1:
+        spins = spins[:, 0]
+    cpu_indices = basis.batched_index(spins.cpu().numpy().view(np.uint64))
+    indices = torch.from_numpy(cpu_indices.view(np.int64)).to(spins.device)
+    v = ground_state[indices]
+    return torch.dot(v, v)
+
+
 def kagome_36_supervised():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--prefix", type=str, default="../data/symm/autogen/heisenberg_kagome_36", help="File basename."
+        "--prefix",
+        type=str,
+        default="../data/symm/autogen/heisenberg_kagome_36",
+        help="File basename.",
     )
     parser.add_argument("--seed", type=int, default=None, help="Seed.")
     parser.add_argument(
@@ -1369,6 +1420,7 @@ def kagome_36_supervised():
     parser.add_argument("--output", type=str, required=True, help="Output dir.")
     parser.add_argument("--lr", type=float, default=1e-2, help="Learning rate")
     parser.add_argument("--momentum", type=float, default=0.8, help="Momentum")
+    parser.add_argument("--number-spins", type=int, default=36, help="Number spins")
     args = parser.parse_args()
     make_deterministic(args.seed)
     device = torch.device(args.device)
@@ -1381,8 +1433,9 @@ def kagome_36_supervised():
 
     sampler_fn = make_sampler(hamiltonian.basis, ground_state)
 
-    model = KagomeSignNetwork(36, device).to(device)
+    model = KagomeSignNetwork(args.number_spins, device).to(device)
     logger.info("Model contains {} parameters", sum(t.numel() for t in model.parameters()))
+    # model.load_state_dict(torch.load("output/12/16x5_256_SGD_1e-2_0.9/model_weights_500.pt"))
     # assert model.layer1.adj[0][1].device == device
     # model = torch.jit.script(
     #     torch.nn.Sequential(
@@ -1407,7 +1460,7 @@ def kagome_36_supervised():
     tb_writer = SummaryWriter(log_dir=args.output)
 
     def on_epoch_end(epoch: int, epochs: int, loss: float, _accuracy: Optional[float] = None):
-        if epoch > 0 and epoch % 50 == 0:
+        if epoch % 50 == 0:
             info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
             tb_writer.add_scalar("loss", loss, epoch)
             tb_writer.add_scalar("accuracy", info["accuracy"], epoch)
@@ -1420,6 +1473,9 @@ def kagome_36_supervised():
                 info["accuracy"],
                 info["overlap"],
             )
+            torch.save(
+                model.state_dict(), os.path.join(args.output, "model_weights_{}.pt".format(epoch))
+            )
         elif _accuracy is not None:
             logger.debug("[{}/{}]: loss = {}, accuracy' = {}", epoch, epochs, loss, _accuracy)
             tb_writer.add_scalar("loss", loss, epoch)
@@ -1431,17 +1487,29 @@ def kagome_36_supervised():
     # info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
     # logger.debug("Accuracy: {}; overlap: {}", info["accuracy"], info["overlap"])
 
-    spins, weights = sampler_fn(100000)
-    spins, signs, counts = optimize_sign_structure(
-        spins, weights, hamiltonian, ground_state, number_sweeps=10000, cheat=True
+    spins, weights = sampler_fn(50000)
+    log_coeff_fn = _make_log_coeff_fn(
+        ground_state.abs(), model, basis, get_dtype(model), get_device(model)
     )
+    spins, signs, counts = optimize_sign_structure(
+        spins, weights, hamiltonian, log_coeff_fn, ground_state, scale_field=0, cheat=False
+    )
+    _, signs_exact, _ = optimize_sign_structure(
+        spins, weights, hamiltonian, log_coeff_fn, ground_state, cheat=True
+    )
+    sa_accuracy = torch.sum(signs_exact == signs).float() / spins.shape[0]
+    # logger.debug("SA accuracy with exact fields: {}", accuracy_with_exact)
+    logger.debug("Simulated Annealing accuracy: {:.3f}", sa_accuracy)
+    logger.info("Sampled {} of the Hilbert space", compute_total_weight(spins, basis, ground_state))
+
+    weights = counts # torch.ones_like(counts)
     tune_neural_network(
         model,
-        (spins, signs, counts),
+        (spins, signs, weights),
         optimizer=torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum),
         # torch.optim.Adam(model.parameters(), lr=1e-3),
         scheduler=None,
-        epochs=1000,
+        epochs=500,
         batch_size=256,
         on_epoch_end=on_epoch_end,
     )
