@@ -1585,7 +1585,8 @@ def kagome_36_annealing():
     spins, weights = sampler_fn(50000)
 
     for outer_iteration in range(10):
-        output = os.path.join(args.output, "{:02i}".format(outer_iteration))
+        output = os.path.join(args.output, "{:02d}".format(outer_iteration))
+        print(output)
         tb_writer = SummaryWriter(log_dir=output)
         spins, signs, counts = optimize_sign_structure(
             spins, weights, hamiltonian, log_coeff_fn, ground_state, scale_field=0, cheat=False
