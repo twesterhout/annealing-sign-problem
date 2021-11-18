@@ -1586,8 +1586,9 @@ def kagome_36_annealing():
 
     for outer_iteration in range(10):
         output = os.path.join(args.output, "{:02d}".format(outer_iteration))
-        print(output)
         tb_writer = SummaryWriter(log_dir=output)
+        on_epoch_end = lambda *args, **kwargs: _on_epoch_end(tb_writer, *args, **kwargs)
+
         spins, signs, counts = optimize_sign_structure(
             spins, weights, hamiltonian, log_coeff_fn, ground_state, scale_field=0, cheat=False
         )
