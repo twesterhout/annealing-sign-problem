@@ -333,9 +333,13 @@ Config = namedtuple(
 )
 
 
-def _make_log_coeff_fn(amplitude, sign, basis, dtype, device):
+def _make_log_coeff_fn(amplitude, sign, basis, dtype=None, device=None):
     assert isinstance(amplitude, Tensor)
     assert isinstance(sign, torch.nn.Module)
+    if dtype is None:
+        dtype = get_dtype(sign)
+    if device is None:
+        device = get_device(sign)
     log_amplitude = amplitude.log().unsqueeze(dim=1)
     log_amplitude = log_amplitude.to(device=device, dtype=dtype)
 
@@ -1289,7 +1293,7 @@ class KagomeSignNetwork(torch.nn.Module):
         self.number_spins = number_spins
         self.sublattices = max(map(lambda t: t[0], self.adj)) + 1
         assert self.sublattices == 3
-        channels = 32 # 16
+        channels = 32  # 16
         self.layers = torch.nn.Sequential(
             LatticeConvolution(1, channels, self.adj),
             torch.nn.ReLU(inplace=True),
@@ -1435,7 +1439,7 @@ def kagome_36_supervised():
 
     model = KagomeSignNetwork(args.number_spins, device).to(device)
     logger.info("Model contains {} parameters", sum(t.numel() for t in model.parameters()))
-    # model.load_state_dict(torch.load("output/12/16x5_256_SGD_1e-2_0.9/model_weights_500.pt"))
+    # model.load_state_dict(torch.load("output/36/32x4_256_SGD_5e-3_0.8_0/model_weights_500.pt"))
     # assert model.layer1.adj[0][1].device == device
     # model = torch.jit.script(
     #     torch.nn.Sequential(
@@ -1502,7 +1506,7 @@ def kagome_36_supervised():
     logger.debug("Simulated Annealing accuracy: {:.3f}", sa_accuracy)
     logger.info("Sampled {} of the Hilbert space", compute_total_weight(spins, basis, ground_state))
 
-    weights = counts # torch.ones_like(counts)
+    weights = counts  # torch.ones_like(counts)
     tune_neural_network(
         model,
         (spins, signs, weights),
@@ -1513,3 +1517,95 @@ def kagome_36_supervised():
         batch_size=256,
         on_epoch_end=on_epoch_end,
     )
+
+
+def kagome_36_annealing():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--prefix",
+        type=str,
+        default="../data/symm/autogen/heisenberg_kagome_36",
+        help="File basename.",
+    )
+    parser.add_argument("--seed", type=int, default=None, help="Seed.")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device."
+    )
+    parser.add_argument("--output", type=str, required=True, help="Output dir.")
+    parser.add_argument("--lr", type=float, default=2e-2, help="Learning rate")
+    parser.add_argument("--momentum", type=float, default=0.8, help="Momentum")
+    parser.add_argument("--number-spins", type=int, default=36, help="Number spins")
+    args = parser.parse_args()
+    make_deterministic(args.seed)
+    device = torch.device(args.device)
+    logger.debug("The computation will run on {}", device)
+
+    with torch.no_grad():
+        hamiltonian, ground_state = load_input_files(args.prefix)
+        basis = hamiltonian.basis
+        ground_state = ground_state.to(device)
+
+    sampler_fn = make_sampler(hamiltonian.basis, ground_state)
+
+    model = KagomeSignNetwork(args.number_spins, device).to(device)
+    logger.info("Model contains {} parameters", sum(t.numel() for t in model.parameters()))
+
+    def _on_epoch_end(
+        tb_writer: SummaryWriter,
+        epoch: int,
+        epochs: int,
+        loss: float,
+        _accuracy: Optional[float] = None,
+    ):
+        if epoch % 50 == 0:
+            info = compute_metrics_on_full_space(hamiltonian.basis, ground_state, model)
+            tb_writer.add_scalar("loss", loss, epoch)
+            tb_writer.add_scalar("accuracy", info["accuracy"], epoch)
+            tb_writer.add_scalar("overlap", info["overlap"], epoch)
+            logger.debug(
+                "[{}/{}]: loss = {}, accuracy = {}, overlap = {}",
+                epoch,
+                epochs,
+                loss,
+                info["accuracy"],
+                info["overlap"],
+            )
+            torch.save(
+                model.state_dict(), os.path.join(args.output, "model_weights_{}.pt".format(epoch))
+            )
+        elif _accuracy is not None:
+            logger.debug("[{}/{}]: loss = {}, accuracy' = {}", epoch, epochs, loss, _accuracy)
+            tb_writer.add_scalar("loss", loss, epoch)
+            tb_writer.add_scalar("train_accuracy", loss, _accuracy)
+        else:
+            logger.debug("[{}/{}]: loss = {}", epoch, epochs, loss)
+            tb_writer.add_scalar("loss", loss, epoch)
+
+    log_coeff_fn = _make_log_coeff_fn(ground_state.abs(), model, basis)
+    spins, weights = sampler_fn(50000)
+
+    for outer_iteration in range(10):
+        output = os.path.join(args.output, "{:02i}".format(outer_iteration))
+        tb_writer = SummaryWriter(log_dir=output)
+        spins, signs, counts = optimize_sign_structure(
+            spins, weights, hamiltonian, log_coeff_fn, ground_state, scale_field=0, cheat=False
+        )
+        _, signs_exact, _ = optimize_sign_structure(
+            spins, weights, hamiltonian, log_coeff_fn, ground_state, cheat=True
+        )
+        sa_accuracy = torch.sum(signs_exact == signs).float() / spins.shape[0]
+        logger.debug("Simulated Annealing accuracy: {:.3f}", sa_accuracy)
+        logger.info(
+            "Sampled {} of the Hilbert space", compute_total_weight(spins, basis, ground_state)
+        )
+
+        weights = counts  # torch.ones_like(counts)
+        tune_neural_network(
+            model,
+            (spins, signs, weights),
+            optimizer=torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum),
+            scheduler=None,
+            epochs=500,
+            batch_size=256,
+            on_epoch_end=on_epoch_end,
+        )
