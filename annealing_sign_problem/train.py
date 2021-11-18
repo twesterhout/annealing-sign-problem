@@ -1590,7 +1590,7 @@ def kagome_36_annealing():
         on_epoch_end = lambda *args, **kwargs: _on_epoch_end(tb_writer, *args, **kwargs)
 
         spins, signs, counts = optimize_sign_structure(
-            spins, weights, hamiltonian, log_coeff_fn, ground_state, scale_field=0, cheat=False
+            spins, weights, hamiltonian, log_coeff_fn, ground_state, scale_field=1e-2, cheat=False
         )
         _, signs_exact, _ = optimize_sign_structure(
             spins, weights, hamiltonian, log_coeff_fn, ground_state, cheat=True
@@ -1607,7 +1607,7 @@ def kagome_36_annealing():
             (spins, signs, weights),
             optimizer=torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum),
             scheduler=None,
-            epochs=500,
+            epochs=300,
             batch_size=256,
             on_epoch_end=on_epoch_end,
         )
