@@ -127,8 +127,10 @@ def tune_neural_network(
 
 
 @torch.no_grad()
-def make_sampler(basis: ls.SpinBasis, ground_state: Tensor) -> Callable[[], Tuple[Tensor, Tensor]]:
-    weights = ground_state.to(torch.float64).abs() ** 2
+def make_sampler(
+    basis: ls.SpinBasis, ground_state: Tensor, sampled_power: float = 2
+) -> Callable[[], Tuple[Tensor, Tensor]]:
+    weights = ground_state.to(torch.float64).abs() ** sampled_power
     weights /= torch.sum(weights)
     spins = torch.from_numpy(basis.states.view(np.int64)).to(weights.device)
     assert weights.size() == spins.size()
@@ -206,6 +208,7 @@ def optimize_sign_structure(
     beta1: Optional[int] = None,
     # sampled_power: Optional[int] = None,
     scale_field: Optional[float] = None,
+    sampled_power: float = 2,
     cheat: bool = True,
 ) -> Tuple[Tensor, Tensor, Tensor]:
     if cheat:
@@ -228,7 +231,7 @@ def optimize_sign_structure(
             cpu_spins0,
             hamiltonian,
             log_coeff_fn,
-            sampled_power=2,
+            sampled_power=sampled_power,
             device=device,
             scale_field=scale_field,
         )
@@ -256,7 +259,8 @@ def optimize_sign_structure(
         logger.debug("Initial unweighted accuracy: {}", accuracy)
         cpu_indices = hamiltonian.basis.batched_index(cpu_spins[:, 0])
         indices = torch.from_numpy(cpu_indices.view(np.int64)).to(spins.device)
-        weights = ground_state[indices]**2
+        weights = ground_state[indices].abs() ** sampled_power
+        weights /= torch.sum(weights)
         overlap = torch.dot(2 * mask - 1, weights).item()
         logger.debug("Initial overlap: {}", overlap)
         if overlap < 0:
@@ -489,7 +493,7 @@ def find_ground_state(config):
             predicted_sign_structure = predicted_sign_structure.argmax(dim=1)
             mask = correct_sign_structure == predicted_sign_structure
             accuracy = torch.sum(mask, dim=0).item() / all_spins.size(0)
-            overlap = torch.dot(2 * mask.to(ground_state.dtype) - 1, ground_state ** 2)
+            overlap = torch.dot(2 * mask.to(ground_state.dtype) - 1, ground_state.abs() ** sampled_power)
         return accuracy, overlap
 
     accuracy, overlap = compute_metrics()
@@ -1322,6 +1326,7 @@ class KagomeResidualBlock(torch.nn.Module):
         x = torch.nn.functional.relu(x)
         return x
 
+
 class KagomeResidualNetwork(torch.nn.Module):
     def __init__(self, number_spins: int, number_channels: int, number_blocks: int, device):
         super().__init__()
@@ -1330,12 +1335,8 @@ class KagomeResidualNetwork(torch.nn.Module):
         elif number_spins == 36:
             self.adj = KAGOME_36_ADJ
         self.adj = adj_to_device(self.adj, device)
-        layers = [
-            LatticeConvolution(1, number_channels, self.adj),
-            torch.nn.ReLU()
-        ] + [
-            KagomeResidualBlock(number_spins, number_channels, device)
-            for i in range(number_blocks)
+        layers = [LatticeConvolution(1, number_channels, self.adj), torch.nn.ReLU()] + [
+            KagomeResidualBlock(number_spins, number_channels, device) for i in range(number_blocks)
         ]
         self.layers = torch.nn.Sequential(*layers)
         self.number_spins = number_spins
@@ -1622,7 +1623,8 @@ def kagome_36_annealing():
         basis = hamiltonian.basis
         ground_state = ground_state.to(device)
 
-    sampler_fn = make_sampler(hamiltonian.basis, ground_state)
+    sampled_power = 1.5
+    sampler_fn = make_sampler(hamiltonian.basis, ground_state, sampled_power)
 
     # model = KagomeResidualNetwork(args.number_spins, 16, 6, device).to(device)
     # model = KagomeSignNetwork(args.number_spins, 32, device).to(device)
@@ -1659,7 +1661,8 @@ def kagome_36_annealing():
                     info["overlap"],
                 )
                 torch.save(
-                    model.state_dict(), os.path.join(args.output, "model_weights_{}.pt".format(global_epoch))
+                    model.state_dict(),
+                    os.path.join(args.output, "model_weights_{}.pt".format(global_epoch)),
                 )
             elif _accuracy is not None:
                 logger.debug("[{}/{}]: loss = {}, accuracy' = {}", epoch, epochs, loss, _accuracy)
@@ -1671,10 +1674,24 @@ def kagome_36_annealing():
 
         spins, weights = sampler_fn(100000)
         spins, signs, counts = optimize_sign_structure(
-            spins, weights, hamiltonian, log_coeff_fn, ground_state, number_sweeps=2500, scale_field=0, cheat=False
+            spins,
+            weights,
+            hamiltonian,
+            log_coeff_fn,
+            ground_state,
+            number_sweeps=2500,
+            scale_field=0,
+            sampled_power=sampled_power,
+            cheat=False,
         )
         _, signs_exact, _ = optimize_sign_structure(
-            spins, weights, hamiltonian, log_coeff_fn, ground_state, cheat=True
+            spins,
+            weights,
+            hamiltonian,
+            log_coeff_fn,
+            ground_state,
+            sampled_power=sampled_power,
+            cheat=True,
         )
         sa_accuracy = torch.sum(signs_exact == signs).float() / spins.shape[0]
         logger.debug("Simulated Annealing accuracy: {:.3f}", sa_accuracy)
@@ -1685,8 +1702,9 @@ def kagome_36_annealing():
         cpu_spins = spins[:, 0].cpu().numpy().view(np.uint64)
         cpu_indices = hamiltonian.basis.batched_index(cpu_spins)
         indices = torch.from_numpy(cpu_indices.view(np.int64)).to(ground_state.device)
-        weights = ground_state[indices]**2
+        weights = ground_state[indices].abs() ** sampled_power
         weights = weights.to(get_dtype(model))
+        weights /= torch.sum(weights)
         # weights = torch.ones_like(counts)
         tune_neural_network(
             model,
