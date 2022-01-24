@@ -1,24 +1,29 @@
-name: annealing
+name: annealing_gpu
 channels:
   - pytorch
+  - nvidia
   - twesterhout
   - conda-forge
 dependencies:
   - python
   - pip
-  - torchvision
+  # - torchvision
   - pip:
     - black
       # - grip
-    - loguru
     - neovim
   # - cpuonly
-  - nqs-playground=1.1.0
-  - pytorch=1.8.1
+  - cudatoolkit=11.1 # need it for A100
+  # - cudatoolkit=10.2
+  - pytorch=1.9.1=*cuda*
+  - unpack-bits=*=*cuda*
+  - ising-glass-annealer>=0.2.0.1
   - lattice-symmetries
-  - ising-glass-annealer
+  - gcc_linux-64
   - h5py
   - pyyaml
   - numpy
   - scipy
-  - matplotlib
+  - loguru
+  - tensorboard
+  #  - matplotlib
