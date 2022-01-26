@@ -119,6 +119,38 @@ combinatorial optimization algorithms to minimize energy in
 Eq.\eqref{eq:classical-hamiltonian}. Classical Simulated Annealing will be our
 algorithm of choice.
 
+We will perform two case studies to support our claim. First,
+we will start with rather small systems where Simulated Annealing (SA) can be run on
+the whole Hilbert space. Since it is well known that SA struggles to solve even
+small classical spin glasses (references...), showing that SA works well on
+systems with a few tens of thousand of classical spins is sufficient to
+illustrate that Eq.\eqref{eq:classical-hamiltonian} is not glassy.
+
+One possible definition of strong frustration is that a strongly frustrated
+system cannot be solved in a divide-and-conquer fashion, rather one needs to
+analyze the system as a whole. To show that this is not the case with our
+induced Classical Hamiltonians, we will scale up the system size and run
+Simulated Annealing on small parts of the Hilbert space.
+
+
+#### Simulated Annealing on the full Hilbert space
+
+![](Figure_3.png)
+
+#### Simulated Annealing on small parts of the Hilbert space
+
+![](Figure_4.png)
+
+If one draws spins $|\sigma\rangle$ from the probability distribution given by
+$|\psi|^2$ (or more generally $|\psi|^\alpha$), the corresponding classical
+Ising model is disconnected. Typically, one or two large clusters exist,
+and all other clusters contain just a few spins. Hence, we will analyze
+Simulated Annealing quality on each of those clusters separately.
+
+![](Figure_5.png)
+
+
+## Conclusion
 
 
 <!-- Markdeep: --><style class="fallback">body{visibility:hidden;white-space:pre;font-family:monospace}</style><script src="markdeep.min.js" charset="utf-8"></script><script src="https://morgan3d.github.io/markdeep/latest/markdeep.min.js?" charset="utf-8"></script><script>window.alreadyProcessedMarkdeep||(document.body.style.visibility="visible")</script>
