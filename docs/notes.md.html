@@ -1,0 +1,162 @@
+<meta charset="utf-8">
+**On the simplicity of sign structure of frustrated quantum systems**
+
+# Introduction
+
+We talk about the sign problem in general:
+
+* *QMC:* Excellent unbiased method, but both fermionic and
+  frustrated spin systems are problematic because of the sign problem.
+* *VMC:* Even though technically the nature of the sign problem in Variational
+  Monte Carlo is different from standard QMC methods such as Path Integral
+  Quantum Monte Carlo, it still limits the applicability of the method. Here,
+  let us metion both classical VMC methods (`mVMC` package) based on
+  Pfaffian + Jastrow factors as well as more recent additions like Neural
+  Quantum States and Tensor Networks (**TODO:** Google first, has anyone written
+  about sign structure in Tensor Networks? If TDVP is used rather than DMRG,
+  then one should still run into problems because of the signs...).
+* Abstracting away from particular methods, discuss the relation between the
+  sign structure and entanglement in general (e.g. [](https://arxiv.org/abs/1412.3534),
+  [](https://arxiv.org/abs/1605.02477), [](https://arxiv.org/abs/0804.2161)).
+
+Now suppose that the sign structure is known, the all the above methods can be
+made to work very efficiently. For example, Marshall's Sign Rule allows to study
+2D Heisenberg model on square lattices using both QMC and NQS. Ab initio
+fixed-node QMC has been a great success (references...).
+
+In this article we thus assume that amplitudes are somehow known and focus on
+the signs. In particular, we propose an alternative way of thinking about the
+sign structure in terms of classical (Ising) Hamiltonians.
+
+
+# Mapping to classical Ising model
+
+Suppose we have a quantum system of spin-1/2 particles described by Hamiltonian
+$H$, and we are interested in finding its ground state. Furthermore, suppose
+that we have access to exact or approximate amplitudes of the ground state
+wavefunction. For example, we could have gotten approximate amplitudes after
+applying the so-called *transfer learning* technique (references...).
+
+In this section we describe how the Hamiltonian $H$ together with amplitudes
+$|\psi|$ induce a classical Ising Hamiltonian $H^{cl}$ such that its ground
+state specifies the sign structure of the ground state of $H$.
+
+![](Figure_1.png)
+
+For a real (i.e. time reversal-symmetric Hamiltonian) $H$:
+
+\begin{equation}
+\begin{aligned}
+  E &= \langle\psi | H | \psi\rangle
+    = \sum_i \psi_i^* \langle i | H | \psi \rangle
+    = \sum_i \psi_i^* \sum_j \langle i | H | j \rangle \psi_j \rangle \\
+    &= \sum_{ij} |\psi_i| |\psi_j| H_{ij} \cdot \mathrm{sign}(\psi_i) \mathrm{sign}(\psi_j) \\
+    &= \sum_{ij} H^{cl}_{ij} \cdot S_i S_j
+\end{aligned}
+\label{eq:classical-hamiltonian}
+\end{equation}
+
+where $S_i$ and $S_j$ are Ising spin variables.
+
+## Case study: Heisenberg model on bipartite lattice
+
+We start our discussion with a 2D Heisenberg antiferromagnet on square lattice.
+Then show that absence of frustrations in $G_1$ (lattice) result in a completely
+unfrustrated Ising model on $G_2$ (induced graph).
+
+If $G_2$ is not frustrated, then signs can be recovered even **without
+knowledge** about amplitudes using a simple greedy algorithm proceeding in a
+"sequential connected manner" (i.e. BFS or DFS).
+
+![](Figure_2.png)
+
+How can this be used for optimization? Suppose, we would like to estimate
+$\nabla_{w} E_{w}$ (where $E_w$ is the variational energy for
+parameters $w$) stochastically, by means of Monte Carlo:
+
+\begin{equation}
+E_w = \frac{\langle \psi_w | H | \psi_w \rangle}{\langle \psi_w | \psi_w \rangle}
+ = \sum_{\sigma \sim |\psi_w(\sigma)|^2} \sum_{\sigma'} H_{\sigma\sigma'} \frac{\psi_w(\sigma')}{\psi_w(\sigma)}
+\label{eq:eloc}
+\end{equation}
+
+Now for each spin configuration $\sigma$, consider its neighborhood
+$\{\sigma' | H_{\sigma\sigma'} \neq 0\}$. By treating $H_{\sigma\sigma'}
+|\psi_w(\sigma')|/|\psi_(\sigma)|$ as matrix elements of our classical Ising
+Hamiltonian, we can reconstruct all signs of $\psi_(\sigma')$ using a greedy
+algorithm discussed above. Eq.\eqref{eq:eloc} and its derivative can then be
+evaluated, and we can optimize $\psi_w$.
+
+We have thus shown that Marshall's Sign Rule which is commonly employed to study
+2D Heisenberg model on a square lattice is automatically recovered in our
+formalism.
+
+### Proof sketch
+
+For any 2-local U(1)-invariant Hamiltonian $H$, an edge in $G_2$ maps naturally
+to an edge in $G_1$.
+
+(If $H$ is 2-local, then every edge in $H^{cl}$ is associated with at most 2
+spins. Furthermore, only those spins can interact which are connected by edges
+in $G_1$. Finally, if U(1) invariance implies that the ground state has
+well-defined magnetization which means that an edge in $G_2$ exists only if
+neither spin is flipped (we have a self-cycle) or both spins are flipped.)
+
+**Claim:** If $G_1$ is bipartite, then so is $G_2$.
+
+If each edge in $G_2$ maps to an edge in $G_1$, then a cycle in $G_2$ maps to a
+cycle in $G_1$. An odd cycle in $G_2$ then also produces an odd cycle in $G_1$.
+
+
+## Adding frustration
+
+Let us consider a slightly more involved case when the induced graph $G_2$ is
+not bipartite. The Ising model in Eq.\eqref{eq:classical-hamiltonian} become
+frustrated, but one may wonder how badly?
+
+We claim that that the frustration is very mild and propose to use standard
+combinatorial optimization algorithms to minimize energy in
+Eq.\eqref{eq:classical-hamiltonian}. Classical Simulated Annealing will be our
+algorithm of choice.
+
+We will perform two case studies to support our claim. First,
+we will start with rather small systems where Simulated Annealing (SA) can be run on
+the whole Hilbert space. Since it is well known that SA struggles to solve even
+small classical spin glasses (references...), showing that SA works well on
+systems with a few tens of thousand of classical spins is sufficient to
+illustrate that Eq.\eqref{eq:classical-hamiltonian} is not glassy.
+
+One possible definition of strong frustration is that a strongly frustrated
+system cannot be solved in a divide-and-conquer fashion, rather one needs to
+analyze the system as a whole. To show that this is not the case with our
+induced Classical Hamiltonians, we will scale up the system size and run
+Simulated Annealing on small parts of the Hilbert space.
+
+
+### Simulated Annealing on the full Hilbert space
+
+![](Figure_3.png)
+
+### Simulated Annealing on small parts of the Hilbert space
+
+![](Figure_4.png)
+
+If one draws spins $|\sigma\rangle$ from the probability distribution given by
+$|\psi|^2$ (or more generally $|\psi|^\alpha$), the corresponding classical
+Ising model is disconnected. Typically, one or two large clusters exist,
+and all other clusters contain just a few spins. Hence, we will analyze
+Simulated Annealing quality on each of those clusters separately.
+
+![](Figure_5.png)
+
+**Potential extension:** analyze SA accuracy across Neel-to-QSL phase transition
+in 36-site Kagome lattice.
+
+**Potential extension:** mention complex Hamiltonians and the corresponding XY
+model.
+
+# Conclusion
+
+
+<!-- Markdeep: --><style class="fallback">body{visibility:hidden;white-space:pre;font-family:monospace}</style><script src="markdeep.min.js" charset="utf-8"></script><script src="https://morgan3d.github.io/markdeep/latest/markdeep.min.js?" charset="utf-8"></script><script>window.alreadyProcessedMarkdeep||(document.body.style.visibility="visible")</script>
+
