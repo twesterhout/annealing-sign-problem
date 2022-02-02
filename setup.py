@@ -21,9 +21,17 @@ setup(
     author_email="14264576+twesterhout@users.noreply.github.com",
     license="BSD3",
     packages=["annealing_sign_problem"],
-    # package_data={"annealing_sign_problem": ["libbuild_matrix.so"]},
     setup_requires=["cffi>=1.0.0"],
-    cffi_modules=["annealing_sign_problem/build_extension.py:ffibuilder"],  # "filename:global"
-    install_requires=["cffi>=1.0.0", "numpy", "scipy", "lattice-symmetries", "loguru"],
+    cffi_modules=["annealing_sign_problem/build_extension.py:ffibuilder"],
+    install_requires=[
+        "cffi>=1.0.0",
+        "numpy",
+        "scipy",
+        "loguru",
+        "pyyaml",
+        "h5py",
+        "lattice-symmetries>=0.8.2",
+        "ising-glass-annealer>=0.3",
+    ],
     zip_safe=False,
 )
