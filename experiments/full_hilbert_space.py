@@ -32,7 +32,10 @@ class Simulation:
         number_spins = self.classical_hamiltonian.shape[0]
         exact_signs = extract_signs_from_bits(self.exact_solution, number_spins)
         predicted_signs = extract_signs_from_bits(x, number_spins)
-        return np.sum(exact_signs == predicted_signs) / number_spins
+        accuracy = np.sum(exact_signs == predicted_signs) / number_spins
+        if accuracy < 0.5:
+            accuracy = 1 - accuracy
+        return accuracy
 
     def compute_overlap(self, x):
         weights = np.abs(self.ground_state) ** 2
@@ -51,15 +54,15 @@ class Simulation:
             results.append({"accuracy": accuracy, "overlap": overlap, "energy_error": error})
         return results
 
-    def summary(self, results):
+    def summary(self, results, accuracy_threshold=0.999, overlap_threshold=0.999, residual_threshold=1e-10):
         def mean_std(xs):
             xs = np.asarray(xs)
             return np.mean(xs), np.std(xs)
 
-        accuracy_mean, accuracy_err = mean_std([r["accuracy"] for r in results])
-        overlap_mean, overlap_err = mean_std([r["overlap"] for r in results])
-        residual_mean, residual_err = mean_std([r["energy_error"] for r in results])
-        return (accuracy_mean, accuracy_err, overlap_mean, overlap_err, residual_mean, residual_err)
+        accuracy_prob = sum((r["accuracy"] > accuracy_threshold for r in results))
+        overlap_prob = sum((r["overlap"] > overlap_threshold for r in results))
+        residual_prob = sum((r["energy_error"] < residual_threshold for r in results))
+        return (accuracy_prob, 0, overlap_prob, 0, residual_prob, 0)
 
     def dump_results_to_csv(self, results, output):
         with open(output, "w") as f:
