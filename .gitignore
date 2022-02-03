@@ -1,5 +1,7 @@
 *.so
 *.o
 *.h5
+*.aux
+*.log
+*.sif
 __pycache__/
-*.h5
