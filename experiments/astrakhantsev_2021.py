@@ -212,9 +212,9 @@ def combine_amplitude_and_phase_all_2x2x2(*modules) -> torch.nn.Module:
             # fmt: on
 
             self.symms = [np.arange(32)]
-            # self.symms = self.symms + [symm[tr_x] for symm in self.symms]
-            # self.symms = self.symms + [symm[tr_y] for symm in self.symms]
-            # self.symms = self.symms + [symm[tr_z] for symm in self.symms]
+            self.symms = self.symms + [symm[tr_x] for symm in self.symms]
+            self.symms = self.symms + [symm[tr_y] for symm in self.symms]
+            self.symms = self.symms + [symm[tr_z] for symm in self.symms]
 
             self.symms = self.symms + [symm[M] for symm in self.symms]
             self.symms = self.symms + [symm[I] for symm in self.symms]
@@ -257,7 +257,7 @@ def load_cnn(path="3f_simplephase_0.000_1.000_onlyamplitude.data_200"):
     nx = 2
     ny = 2
     nz = 2
-    model = combine_amplitude_and_phase_all_2x2x2(
+    model = combine_amplitude_and_phase(
         Net_nonsymmetric_3l_2x2x2_narrowing(nx, ny, nz),
         Net_nonsymmetric_1l_2x2x2_narrowing_simplephase(nx, ny, nz)
     )
@@ -302,8 +302,8 @@ def establish_baseline():
         nqs.SamplingOptions(
             number_samples=200,
             number_chains=2,
-            sweep_size=1,
-            number_discarded=1000,
+            sweep_size=5,
+            number_discarded=10,
             mode="zanella",
             device=device,
         ),
