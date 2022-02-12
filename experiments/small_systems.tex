@@ -1,0 +1,62 @@
+\documentclass{article}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{pgfplots.colorbrewer}
+
+\begin{document}
+\begin{tikzpicture}
+    \begin{axis}[
+        width=0.8\textwidth,
+        height=0.6\textwidth,
+        tick label style={font=\footnotesize},
+        % label style={font=\small},
+        cycle list/Dark2-5,
+        % define fill color for the marker
+        % mark list fill={.!75!white},
+        % create new `cycle list` from existing `cycle list's and an
+        % cycle multiindex* list={Set2-5\nextlist},
+        grid=major,
+        xlabel={Number of sweeps},
+        % ylabel={Probability of reaching $0.995$ accuracy},
+        ylabel={$P(\mathcal{A}>0.995)$},
+        legend style={font=\footnotesize},
+        legend entries={{Kagome 16},{Kagome 18},{$J_1$-$J_2$},{SK 1},{SK 2},{SK 3}},
+        legend pos={south east},
+    ]
+    \addplot+[
+        mark=*
+    ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+        {data/heisenberg_kagome_16.csv};
+
+    \addplot+[
+        mark=square*
+    ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+        {data/heisenberg_kagome_18.csv};
+
+    \addplot+[
+        mark=diamond*,
+        mark size=3pt,
+    ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+        {data/j1j2_square_4x4.csv};
+
+    \addplot+[
+        mark=triangle*,
+        mark size=3pt
+    ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+        {data/sk_16_1.csv};
+
+    \addplot+[
+        mark=triangle*,
+        mark size=3pt
+    ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+        {data/sk_16_2.csv};
+
+    % \addplot+[
+    %     mark=triangle*,
+    %     mark size=3pt
+    % ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+    %     {experiments/data/sk_16_3.csv};
+
+    \end{axis}
+\end{tikzpicture}
+\end{document}

@@ -1,0 +1,8 @@
+Bootstrap: docker
+From: pandoc/latex:latest-alpine
+
+%post
+    tlmgr update --self && tlmgr install sectsty lastpage helvetic pgfplots
+
+%runscript
+    pdflatex "$@"
