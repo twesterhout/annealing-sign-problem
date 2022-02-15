@@ -51,11 +51,15 @@ def slice_coo_matrix(
 
 
 def extract_local_hamiltonian(
-    mask: np.ndarray, hamiltonian: sa.Hamiltonian, spins: Tensor
+    mask: np.ndarray,
+    hamiltonian: sa.Hamiltonian,
+    spins: Tensor,
+    scale_field: float = 1,
 ) -> Tuple[sa.Hamiltonian, Tensor]:
     (spin_indices,) = np.nonzero(mask)
     spins = spins[spin_indices]
     field = hamiltonian.field[spin_indices]
+    field *= scale_field
     exchange = slice_coo_matrix(hamiltonian.exchange, spin_indices)
     return sa.Hamiltonian(exchange, field), spins
 
@@ -115,15 +119,24 @@ def build_and_analyze_clusters(
     ground_state: np.ndarray,
     hamiltonian: ls.Operator,
     log_coeff_fn: Callable[[np.ndarray], np.ndarray],
+    cutoff: float = 0,
 ):
     if weights is None:
         spins = np.unique(spins, axis=0)
+
+    def transformed_log_coeff_fn(x):
+        r = log_coeff_fn(x)
+        r.imag = 0
+        return r
+
     h, spins, x0, counts = extract_classical_ising_model(
         spins,
         hamiltonian,
         log_coeff_fn,
+        # transformed_log_coeff_fn,
         monte_carlo_weights=weights,
-        scale_field=0,
+        scale_field=1,
+        cutoff=cutoff,
     )
     number_components, component_labels = connected_components(h.exchange, directed=False)
     component_sizes = np.asarray([np.sum(component_labels == i) for i in range(number_components)])
@@ -132,7 +145,13 @@ def build_and_analyze_clusters(
     for i in range(number_components):
         if component_sizes[i] < 10:
             continue
-        local_hamiltonian, local_spins = extract_local_hamiltonian(component_labels == i, h, spins)
+        logger.debug("Processing cluster with {} elements...", component_sizes[i])
+        # local_hamiltonian_with_fields, _ = extract_local_hamiltonian(
+        #     component_labels == i, h, spins, scale_field=1
+        # )
+        local_hamiltonian, local_spins = extract_local_hamiltonian(
+            component_labels == i, h, spins, scale_field=0
+        )
         signs, e = sa.anneal(
             local_hamiltonian,
             seed=None,
@@ -146,16 +165,30 @@ def build_and_analyze_clusters(
         true_signs = 2 * (ground_state[local_indices] >= 0) - 1
         accuracy = np.sum(signs == true_signs) / local_spins.shape[0]
         if accuracy < 0.5:
+            signs = -signs
             accuracy = 1 - accuracy
 
         v = ground_state[local_indices]
         v /= np.linalg.norm(v)
         overlap = abs(np.dot(v, np.abs(v) * signs))
         results.append(ComponentStats(size=component_sizes[i], accuracy=accuracy, overlap=overlap))
+
+        # table = []
+        # for k in range(local_spins.shape[0]):
+        #     is_correct = signs[k] == true_signs[k]
+        #     field = abs(local_hamiltonian_with_fields.field[k])
+        #     mask = local_hamiltonian_with_fields.exchange.row == k
+        #     coupling = np.sum(np.abs(local_hamiltonian_with_fields.exchange.data[mask]))
+        #     table.append((int(is_correct), field, coupling))
+        # with open("correlation.dat", "a") as f:
+        #     for t in table:
+        #         f.write("{}\t{}\t{}\n".format(*t))
+
     return results
 
 
 def main():
+    np.random.seed(12345)
     yaml_path = "../data/symm/heisenberg_kagome_36.yaml"
     hdf5_path = "../data/symm/heisenberg_kagome_36.h5"
     # yaml_path = "../physical_systems/heisenberg_pyrochlore_2x2x2.yaml"
@@ -167,9 +200,10 @@ def main():
 
     stats = []
     sampled_power = 1.5
+    cutoff = 4e-4
     number_repetitions = 5
-    filename = "stats_kagome_36_p={}.dat".format(sampled_power)
-    for number_samples in [100 * i for i in range(1, 100)]:
+    filename = "stats_kagome_36_p={}_cutoff={}.dat".format(sampled_power, cutoff)
+    for number_samples in [100 * i for i in range(100, 500, 25)]:
         for i in range(number_repetitions):
             spins, weights = monte_carlo_sampling(
                 ground_state,
@@ -177,7 +211,9 @@ def main():
                 number_samples=number_samples,
                 sampled_power=sampled_power,
             )
-            r = build_and_analyze_clusters(spins, weights, ground_state, hamiltonian, log_coeff_fn)
+            r = build_and_analyze_clusters(
+                spins, None, ground_state, hamiltonian, log_coeff_fn, cutoff=cutoff
+            )
             stats += r
         with open(filename, "w") as f:
             for s in sorted(stats, key=lambda s: s.size):

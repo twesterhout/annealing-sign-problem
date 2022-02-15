@@ -282,6 +282,7 @@ def extract_classical_ising_model(
     # sampled_power: Optional[int] = None,
     # device: Optional[torch.device] = None,
     scale_field: float = 1,
+    cutoff: float = 0,
 ):
     r"""Map quantum Hamiltonian to classical Ising model where wavefunction coefficients are now
     considered spin degrees of freedom.
@@ -399,6 +400,11 @@ def extract_classical_ising_model(
     # not hurt and may fix some numerical differences.
     matrix = 0.5 * (matrix + matrix.T)
     matrix = matrix.tocoo()
+    mask = np.abs(matrix.data) >= cutoff * np.max(np.abs(matrix.data))
+    row_indices = matrix.row[mask]
+    col_indices = matrix.col[mask]
+    elements = matrix.data[mask]
+    matrix = scipy.sparse.coo_matrix((elements, (row_indices, col_indices)), shape=(n, n))
     field *= scale_field
     h = sa.Hamiltonian(matrix, field)
 
