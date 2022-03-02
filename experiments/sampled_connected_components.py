@@ -291,7 +291,7 @@ def compute_local_energy_one(
         neighborhood_spins, neighborhood_coeffs = hamiltonian.apply(initial_spins[batch_index])
         neighborhood_spins = neighborhood_spins[:, 0]
         neighborhood_log_coeff = log_coeff_fn(neighborhood_spins).real
-        current_log_coeff = log_coeff_fn(initial_spins[batch_index:batch_index + 1]).real
+        current_log_coeff = log_coeff_fn(initial_spins[batch_index : batch_index + 1]).real
 
         neighborhood_indices = np.searchsorted(spins, neighborhood_spins)
         assert np.all(spins[neighborhood_indices] == neighborhood_spins)
@@ -325,7 +325,7 @@ def magically_compute_local_values(
         hamiltonian,
         log_coeff_fn,
         # transformed_log_coeff_fn,
-        monte_carlo_weights=np.ones(spins.shape[0]), # weights,
+        monte_carlo_weights=np.ones(spins.shape[0]),  # weights,
         scale_field=0,
         cutoff=cutoff,
     )
@@ -382,15 +382,154 @@ def magically_compute_local_values(
         # )
         # print(accuracy, local_energy)
         # local_energies.append(local_energy)
-    mask = ~ np.isnan(local_energies)
+    mask = ~np.isnan(local_energies)
     local_energies = local_energies[mask]
     counts = counts[mask]
     print(np.dot(counts, local_energies) / np.sum(counts))
     return local_energies
 
 
+SmallCluster = collections.namedtuple("SmallCluster", ["spins", "true_signs"])
+
+
+def create_small_cluster_around_point(
+    s0: int,
+    hamiltonian: ls.Operator,
+    required_size: int = 20,
+    keep_probability: float = 0.5,
+):
+    s0 = int(s0)
+    spins = {s0}
+
+    def children_of(s):
+        xs, _ = hamiltonian.apply(s)
+        if xs.ndim > 1:
+            xs = xs[:, 0]
+        children = []
+        for x in xs:
+            if x in spins:
+                continue
+            if np.random.rand() <= keep_probability:
+                children.append(int(x))
+        return children
+
+    children = children_of(s0)
+    while len(spins) < required_size and len(children) > 0:
+        new_children = set()
+        for s in children:
+            new_children |= set(children_of(s))
+        for child in children:
+            spins.add(child)
+            if len(spins) > required_size:
+                break
+        # spins |= set(children)
+        children = new_children
+
+    return sorted(list(spins))
+
+
+def optimize_connected_component(
+    spins: np.ndarray,
+    hamiltonian: ls.Operator,
+    log_coeff_fn: Callable[[np.ndarray], np.ndarray],
+    extension_order: int = 0,
+    cutoff: float = 0,
+):
+    spins = np.asarray(spins, dtype=np.uint64)
+    if spins.ndim > 1:
+        spins = spins[:, 0]
+    spins0 = spins
+    log_coeff0 = log_coeff_fn(spins0)
+    if cutoff == 0:
+        absolute_log_cutoff = -np.inf
+    else:
+        absolute_log_cutoff = np.log(cutoff) + np.max(log_coeff0.real)
+    logger.debug("Starting with a cluster of {} spins ...", len(spins))
+    for i in range(extension_order):
+        extended_spins, extended_coeffs, extended_counts = hamiltonian.batched_apply(spins)
+        extended_spins = extended_spins[:, 0]
+        assert len(extended_counts) == spins.shape[0]
+        log_coeff = log_coeff_fn(spins)
+        extended_log_coeff = log_coeff_fn(extended_spins)
+
+        mask = np.empty(len(extended_coeffs), dtype=bool)
+        offset = 0
+        for i in range(len(extended_counts)):
+            log_couplings = (
+                log_coeff[i].real
+                + np.log(np.abs(extended_coeffs[offset : offset + extended_counts[i]]))
+                + extended_log_coeff[offset : offset + extended_counts[i]].real
+            )
+            mask[offset : offset + extended_counts[i]] = log_couplings >= absolute_log_cutoff
+            offset += extended_counts[i]
+        extended_spins = extended_spins[mask]
+        spins = np.hstack((spins, extended_spins))
+        spins = np.unique(spins, axis=0)
+        logger.debug(
+            "{:.1f}% included; there are now {} spins in the cluster",
+            100 * np.sum(mask) / len(mask),
+            len(spins),
+        )
+
+    h, spins, x0, counts = extract_classical_ising_model(
+        spins,
+        hamiltonian,
+        log_coeff_fn,
+        monte_carlo_weights=None,
+        scale_field=0,
+    )
+    spins = spins[:, 0]
+    # Sanity check
+    number_components, _ = connected_components(h.exchange, directed=False)
+    assert number_components == 1
+
+    signs, e = sa.anneal(
+        h,
+        seed=None,
+        number_sweeps=5000,
+        repetitions=32,
+        only_best=True,
+    )
+    signs = extract_signs_from_bits(signs, number_spins=spins.shape[0])
+    local_indices = np.searchsorted(spins, spins0)
+    assert np.all(spins[local_indices] == spins0)
+    signs = signs[local_indices]
+    return signs
+
+
+def compute_accuracy_and_overlap(
+    spins: np.ndarray,
+    signs: np.ndarray,
+    hamiltonian: ls.Operator,
+    ground_state: np.ndarray,
+):
+    spins = np.asarray(spins, dtype=np.uint64)
+    indices = hamiltonian.basis.batched_index(spins)
+    v = ground_state[indices]
+    v /= np.linalg.norm(v)
+    true_signs = 2 * (v >= 0) - 1
+    accuracy = np.sum(signs == true_signs) / len(spins)
+    if accuracy < 0.5: # We do not care about the global sign flip
+        signs = -signs
+        accuracy = 1 - accuracy
+    overlap = abs(np.dot(v, np.abs(v) * signs))
+    return accuracy, overlap
+
+
+# def sample_small_clusters(
+#
+# ) -> List[SmallCluster]:
+#     spins, weights = monte_carlo_sampling(
+#         ground_state,
+#         hamiltonian,
+#         number_samples=number_samples,
+#         sampled_power=sampled_power,
+#     )
+#     pass
+
+
 def main():
-    np.random.seed(12346)
+    # np.random.seed(12346)
     # yaml_path = "../data/symm/heisenberg_kagome_36.yaml"
     # hdf5_path = "../data/symm/heisenberg_kagome_36.h5"
     yaml_path = "../physical_systems/heisenberg_pyrochlore_2x2x2.yaml"
@@ -400,32 +539,37 @@ def main():
     hamiltonian.basis.build(_representatives)
     logger.info("Ground state energy: {}", ground_state_energy)
 
-    # mask = np.abs(ground_state) < 1e-10
-    # ground_state[mask] = 1e-10
-    # print(ground_state_energy)
-    # print(hamiltonian.expectation(ground_state))
-    # return
-
     log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
-
-    stats = []
-    sampled_power = 2
-    cutoff = 0  # 2e-3
-    number_repetitions = 1
-    # filename = "stats_pyrochlore_2x2x2_p={}_cutoff={}.dat".format(sampled_power, cutoff)
-    for number_samples in [1000]:  # [100 * i for i in range(10, 80, 2)]:
-        for i in range(number_repetitions):
-            spins, weights = monte_carlo_sampling(
-                ground_state,
-                hamiltonian,
-                number_samples=number_samples,
-                sampled_power=sampled_power,
-            )
-            r = magically_compute_local_values(
-                spins, hamiltonian, log_coeff_fn, cutoff=cutoff
-            )
-            r = np.asarray(r)
-            print(r / 32 / 4, np.mean(r) / 32 / 4, np.std(r) / 32 / 4)
+    sampled_power = 0.5
+    cutoff = 5e-3
+    filename = "stats_pyrochlore_2x2x2_sampled_power={}_cutoff={}.dat".format(sampled_power, cutoff)
+    number_samples = 1000
+    centers, weights = monte_carlo_sampling(
+        ground_state,
+        hamiltonian,
+        number_samples=number_samples,
+        sampled_power=sampled_power,
+    )
+    min_size = 10
+    max_size = 10000
+    for s in centers:
+        # size = np.random.randint(low=10, high=5000)
+        log_size = np.log(min_size) + (np.log(max_size) - np.log(min_size)) * np.random.random_sample()
+        size = int(round(np.exp(log_size)))
+        spins = create_small_cluster_around_point(s, hamiltonian, keep_probability=0.4, required_size=size)
+        row = [len(spins)]
+        for extension_order in range(3):
+            signs = optimize_connected_component(spins, hamiltonian, log_coeff_fn, extension_order=extension_order, cutoff=cutoff)
+            accuracy, overlap = compute_accuracy_and_overlap(spins, signs, hamiltonian, ground_state)
+            row.append(accuracy)
+            row.append(overlap)
+        with open(filename, "a") as f:
+            f.write("\t".join(map(str, row)) + "\n")
+            # r = magically_compute_local_values(
+            #     spins, hamiltonian, log_coeff_fn, cutoff=cutoff
+            # )
+            # r = np.asarray(r)
+            # print(r / 32 / 4, np.mean(r) / 32 / 4, np.std(r) / 32 / 4)
             # r = build_and_analyze_clusters(
             #     spins, None, ground_state, hamiltonian, log_coeff_fn, cutoff=cutoff
             # )
@@ -433,7 +577,7 @@ def main():
         # with open(filename, "w") as f:
         #     for s in sorted(stats, key=lambda s: s.size):
         #         f.write("{}\t{}\t{}\n".format(s.size, s.accuracy, s.overlap))
-    print(ground_state_energy / 32 / 4)
+        # print(ground_state_energy / 32 / 4)
 
     # model = load_unsymmetrized()
     # model = load_cnn()
