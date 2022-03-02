@@ -282,6 +282,7 @@ def extract_classical_ising_model(
     # sampled_power: Optional[int] = None,
     # device: Optional[torch.device] = None,
     scale_field: float = 1,
+    cutoff: float = 0,
 ):
     r"""Map quantum Hamiltonian to classical Ising model where wavefunction coefficients are now
     considered spin degrees of freedom.
@@ -316,9 +317,12 @@ def extract_classical_ising_model(
         raise ValueError("'x' has wrong shape: {}; expected a 2D array".format(x.shape))
     # If spins come from Monte Carlo sampling, there might be duplicates.
     is_from_monte_carlo = monte_carlo_weights is not None
-    spins, counts = np.unique(spins, return_counts=True, axis=0)
-    if is_from_monte_carlo and np.any(counts != 1):
+    spins, indices, counts = np.unique(spins, return_index=True, return_counts=True, axis=0)
+    if not is_from_monte_carlo and np.any(counts != 1):
         raise ValueError("'spins' contains duplicate spin configurations")
+    if is_from_monte_carlo:
+        monte_carlo_weights = monte_carlo_weights[indices]
+        monte_carlo_weights /= np.sum(monte_carlo_weights)
 
     def forward(x: np.ndarray) -> np.ndarray:
         assert isinstance(x, np.ndarray) and x.dtype == np.uint64
@@ -352,8 +356,12 @@ def extract_classical_ising_model(
 
     if is_from_monte_carlo:
         assert np.all(monte_carlo_weights > 0)
-        monte_carlo_weights *= np.exp(-scale)
-        normalization = 1 / np.sum(monte_carlo_weights)
+        # normalization = 1 / np.sum(monte_carlo_weights)
+        # monte_carlo_weights *= np.exp(-scale)
+        # normalization = 1 / np.sum(monte_carlo_weights)
+        # weights = monte_carlo_weights / ψs ** 2
+        # normalization = np.exp(-2 * scale) / np.sum(weights)
+        normalization = 1 / np.sqrt(np.dot(counts, np.abs(ψs) ** 2 / monte_carlo_weights))
         ψs /= monte_carlo_weights
     else:
         normalization = 1 / np.linalg.norm(ψs)
@@ -392,6 +400,11 @@ def extract_classical_ising_model(
     # not hurt and may fix some numerical differences.
     matrix = 0.5 * (matrix + matrix.T)
     matrix = matrix.tocoo()
+    mask = np.abs(matrix.data) >= cutoff * np.max(np.abs(matrix.data))
+    row_indices = matrix.row[mask]
+    col_indices = matrix.col[mask]
+    elements = matrix.data[mask]
+    matrix = scipy.sparse.coo_matrix((elements, (row_indices, col_indices)), shape=(n, n))
     field *= scale_field
     h = sa.Hamiltonian(matrix, field)
 

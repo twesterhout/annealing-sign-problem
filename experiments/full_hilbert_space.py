@@ -54,14 +54,14 @@ class Simulation:
             results.append({"accuracy": accuracy, "overlap": overlap, "energy_error": error})
         return results
 
-    def summary(self, results, accuracy_threshold=0.999, overlap_threshold=0.999, residual_threshold=1e-10):
+    def summary(self, results, accuracy_threshold=0.995, overlap_threshold=0.995, residual_threshold=1e-12):
         def mean_std(xs):
             xs = np.asarray(xs)
             return np.mean(xs), np.std(xs)
 
-        accuracy_prob = sum((r["accuracy"] > accuracy_threshold for r in results))
-        overlap_prob = sum((r["overlap"] > overlap_threshold for r in results))
-        residual_prob = sum((r["energy_error"] < residual_threshold for r in results))
+        accuracy_prob = sum((r["accuracy"] > accuracy_threshold for r in results)) / len(results)
+        overlap_prob = sum((r["overlap"] > overlap_threshold for r in results)) / len(results)
+        residual_prob = sum((r["energy_error"] < residual_threshold for r in results)) / len(results)
         return (accuracy_prob, 0, overlap_prob, 0, residual_prob, 0)
 
     def dump_results_to_csv(self, results, output):
@@ -108,6 +108,8 @@ def main():
     sweeps = list(map(int, args.number_sweeps.split(",")))
     np.random.seed(args.seed)
 
+    with open(output, "w") as f:
+        f.write("number_sweeps,accuracy_prob,accuracy_err,overlap_prob,overlap_err,residual_prob,residual_err\n")
     for number_sweeps in sweeps:
         results = simulation.run(number_sweeps=number_sweeps, repetitions=repetitions)
         results = simulation.analyze(*results)
