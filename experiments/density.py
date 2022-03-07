@@ -1,17 +1,29 @@
 import numpy as np
+import os
 import scipy
 import scipy.stats
 
+
+def estimate_pdf(filename: str):
+    table = np.loadtxt(filename)
+    order = (table.shape[1] - 1) // 2
+    kernels = [
+        scipy.stats.gaussian_kde(table[:, 2 + 2 * i], bw_method=0.1)
+        for i in range(order)
+    ]
+    x = np.linspace(0, 1, 2000)
+    y = [kernel(x) for kernel in kernels]
+    np.savetxt("density_of_states.{}".format(filename), np.vstack([x] + y).T)
+
+
 def main():
-    table = np.loadtxt("stats_pyrochlore_2x2x2_sampled_power=0.5_cutoff=0.005.dat")
-    kernel_2 = scipy.stats.gaussian_kde(table[:, 2])
-    kernel_4 = scipy.stats.gaussian_kde(table[:, 4])
-    kernel_6 = scipy.stats.gaussian_kde(table[:, 6])
-    x = np.linspace(0, 1, 500)
-    y_2 = kernel_2(x)
-    y_4 = kernel_4(x)
-    y_6 = kernel_6(x)
-    np.savetxt("density_of_states.dat", np.vstack([x, y_2, y_4, y_6]).T)
+    for filename in ["kagome_sampled_power=0.1_cutoff=0.0002.dat",
+                     "pyrochlore_sampled_power=0.1_cutoff=0.0002.dat",
+                     "sk_sampled_power=0.1_cutoff=0.0002.dat"]:
+        if os.path.exists(filename):
+            estimate_pdf(filename)
+        else:
+            print("Warning! {} does not exist ...".format(filename))
 
 if __name__ == '__main__':
     main()
