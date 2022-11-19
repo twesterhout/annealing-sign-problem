@@ -401,15 +401,24 @@ def preprocess_amplitudes(n, model, device, batch_size, shift=True):
 
 
 @torch.no_grad()
-def prepare_for_testing(model, device):
-    basis_states = load_basis(36).to(device)
-    amplitudes = torch.abs(load_ground_state(36).to(device))
+def prepare_for_testing(model, device, n=36):
+    basis_states = load_basis(n).to(device)
+    amplitudes = torch.abs(load_ground_state(n).to(device))
 
     def overlap_fn():
         old_shape = model.shape
         old_n = model.n
-        model.shape = (4, 3)
-        model.n = 36
+        if n == 36:
+            model.shape = (4, 3)
+            model.n = 36
+        elif n == 27:
+            model.shape = (3, 3)
+            model.n = 27
+        elif n == 18:
+            model.shape = (3, 2)
+            model.n = 18
+        else:
+            assert False
         overlap = compute_overlap(model, basis_states, amplitudes)
         model.shape = old_shape
         model.n = old_n
@@ -419,8 +428,10 @@ def prepare_for_testing(model, device):
 
 
 def main():
-    n = 18  # 36
+    n = 27
+    testing_n = 36
     batch_size = {12: 8, 18: 256, 27: 4096, 36: 1024}[n]
+    lr = {12: 1e0, 18: 4e0, 27: 4e0, 36: 1e0}[n]
     epochs = 100
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -429,17 +440,18 @@ def main():
     #     shape=(3, 3), kernel_size=(2, 2), channels=4, blocks=16, scale=1e-1
     # )  # Dense(n, [1024, 1024, 1024, 1024])
     model = Convolutional(
-        shape=(2, 3), kernel_size=(2, 2), channels=8, blocks=16, scale=1e-1
+        shape=(3, 3), kernel_size=(2, 2), channels=32, blocks=4, scale=1e-1
     )  # Dense(n, [1024, 1024, 1024, 1024])
+    model.load_state_dict(torch.load("_partial_weights_18_40.pt"))
     model.to(device)
 
     number_parameters = sum((p.numel() for p in model.parameters()))
     logger.info("{} parameters", number_parameters)
 
     dataset, overlap_fn = preprocess_amplitudes(n, model, device, batch_size)
-    overlap36_fn = prepare_for_testing(model, device)
+    overlap36_fn = prepare_for_testing(model, device, n=testing_n)
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=5e-1, momentum=0.8)
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.7)
     # torch.optim.Adam(model.parameters(), lr=1e-3)
     scheduler = None
 
@@ -459,17 +471,17 @@ def main():
     for epoch in range(epochs):
         info = supervised_loop_once(dataset, model, optimizer, scheduler, loss_fn)
         msg = "{}: loss: {}".format(epoch + 1, info["loss"])
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 10 == 0:
             model.eval()
             torch.save(model.state_dict(), "_partial_weights_{}_{}.pt".format(n, epoch + 1))
             overlap = overlap_fn()
             overlap_36 = overlap36_fn()
-            msg += "; overlap: {}; overlap on 36: {}".format(overlap, overlap_36)
+            msg += "; overlap: {}; overlap on {}: {}".format(overlap, testing_n, overlap_36)
         logger.debug(msg)
     info = compute_average_loss(dataset, model, loss_fn)
     logger.debug(
-        "Final loss: {}; overlap: {}; overlap on 36: {}"
-        "".format(info["loss"], overlap_fn(), overlap36_fn())
+        "Final loss: {}; overlap: {}; overlap on {}: {}"
+        "".format(info["loss"], overlap_fn(), testing_n, overlap36_fn())
     )
 
     model.eval()
