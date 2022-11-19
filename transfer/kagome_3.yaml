@@ -1,0 +1,14 @@
+basis:
+  number_spins: 3
+  symmetries: []
+hamiltonian:
+  name: "Hamiltonian"
+  terms:
+    - matrix: [[1,  0,  0, 0],
+               [0, -1,  2, 0],
+               [0,  2, -1, 0],
+               [0,  0,  0, 1]]
+      sites: [[0,1],[1,2],[2,0]]
+observables: []
+number_vectors: 3
+output: "kagome_3.h5"
