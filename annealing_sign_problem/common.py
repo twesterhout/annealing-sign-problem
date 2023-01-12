@@ -1,13 +1,17 @@
-import lattice_symmetries as ls
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+
+import h5py
 import ising_glass_annealer as sa
+import lattice_symmetries as ls
 import numpy as np
 import scipy.sparse
-import time
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
-from loguru import logger
 import yaml
-import h5py
-import os
+from loguru import logger
+from numpy.typing import NDArray
+
 import _build_matrix
 from _build_matrix import ffi
 
@@ -274,6 +278,206 @@ from _build_matrix import ffi
 #     }
 
 
+@dataclass
+class IsingModel:
+    spins: NDArray[np.uint64]
+    quantum_hamiltonian: ls.Operator
+    ising_hamiltonian: sa.Hamiltonian
+    initial_signs: NDArray[np.uint64]
+
+
+def _normalize_spins(spins) -> NDArray[np.uint64]:
+    spins = np.asarray(spins, dtype=np.uint64, order="C")
+    if spins.ndim == 1:
+        spins = np.hstack([spins.reshape(-1, 1), np.zeros((spins.shape[0], 7), dtype=np.uint64)])
+    elif spins.ndim == 2:
+        if spins.shape[1] != 8:
+            raise ValueError("'spins' has wrong shape: {}; expected (?, 8)".format(x.shape))
+        spins = np.ascontiguousarray(spins)
+    else:
+        raise ValueError("'spins' has wrong shape: {}; expected a 2D array".format(x.shape))
+    return spins
+
+
+def make_ising_model(
+    spins: NDArray[np.uint64],
+    quantum_hamiltonian: ls.Operator,
+    log_psi: Optional[NDArray[np.float64]] = None,
+    log_psi_fn: Optional[Callable[[NDArray[np.float64]], NDArray[np.float64]]] = None,
+    external_field: bool = False,
+    debug: bool = True,
+):
+    if debug:
+        ref_h, ref_spins, ref_x0, ref_counts = extract_classical_ising_model(
+            spins, quantum_hamiltonian, log_psi_fn
+        )
+
+    start_time = time.time()
+    if log_psi is None and log_psi_fn is None:
+        raise ValueError("at least one of log_psi or log_psi_fn should be specified")
+    if external_field and log_psi_fn is None:
+        raise ValueError("log_psi_fn should be specified when external_field=True")
+
+    spins = _normalize_spins(spins)
+    spins, indices, counts = np.unique(spins, return_index=True, return_counts=True, axis=0)
+    if np.any(counts != 1):
+        logger.warning("'spins' were not unique, are you sure this is what you want?")
+        spins = spins[indices]
+        if log_psi is not None:
+            log_psi = log_psi[indices]
+    if log_psi is None:
+        log_psi = log_psi_fn(spins)
+    n = spins.shape[0]
+    other_spins, other_coeffs, other_counts = quantum_hamiltonian.batched_apply(spins)
+    if not np.allclose(other_coeffs.imag, 0, atol=1e-6):
+        raise ValueError("expected all Hamiltonian matrix elements to be real")
+    other_coeffs = other_coeffs.real
+
+    assert quantum_hamiltonian.basis.number_spins <= 64, "TODO: only works with up to 64 bits"
+    spins = spins[:, 0]
+    other_spins = other_spins[:, 0]
+    other_indices = np.clip(np.searchsorted(spins, other_spins), 0, n - 1)
+    belong_to_spins = other_spins == spins[other_indices]
+
+    psi = np.exp(log_psi, dtype=np.complex128)
+    if not np.allclose(psi.imag, 0, atol=1e-6):
+        raise ValueError("expected all wavefunction coefficients to be real")
+    psi = np.ascontiguousarray(psi.real)
+    other_psi = np.where(belong_to_spins, psi[other_indices], 0)
+
+    offsets = np.zeros(n + 1, dtype=np.int64)
+    offsets[1:] = np.cumsum(other_counts)
+    elements = other_coeffs * np.abs(other_psi)
+
+    # TODO: speed me up
+    tick = time.time()
+    for i in range(n):
+        elements[offsets[i] : offsets[i + 1]] *= np.abs(psi[i])
+    tock = time.time()
+    logger.debug("Python for loop took {:.2} seconds", tock - tick)
+
+    matrix = scipy.sparse.csr_matrix((elements, other_indices, offsets), shape=(n, n))
+    matrix = 0.5 * (matrix + matrix.T)
+    matrix.sort_indices()
+    matrix = matrix.tocoo()
+
+    field = np.zeros(n, dtype=np.float64)
+    if external_field:
+        assert False
+        # external_other_spins = other_spins[not belong_to_spins]
+        # external_other_log_coeff = log_coeff_fn(_normalize_spins(external_other_spins))
+
+    ising_hamiltonian = sa.Hamiltonian(matrix, field)
+    x0 = np.empty((n + 63) // 64, dtype=np.uint64)
+    _build_matrix.lib.extract_signs(
+        n,
+        ffi.from_buffer("double const[]", psi),
+        ffi.from_buffer("uint64_t const[]", x0),
+    )
+    end_time = time.time()
+    logger.debug("Building the Ising model took {:.2} seconds", end_time - start_time)
+
+    if debug:
+        assert np.all(ref_spins[:, 0] == spins)
+        assert np.all(ref_h.exchange.row == ising_hamiltonian.exchange.row)
+        assert np.all(ref_h.exchange.col == ising_hamiltonian.exchange.col)
+        assert np.allclose(ref_h.exchange.data, ising_hamiltonian.exchange.data)
+        assert np.allclose(ref_h.field, ising_hamiltonian.field)
+        assert np.all(ref_x0 == x0)
+    return IsingModel(spins, quantum_hamiltonian, ising_hamiltonian, x0)
+
+
+def compute_accuracy_and_overlap(
+    predicted: NDArray[np.uint64],
+    exact: NDArray[np.uint64],
+    weights: Optional[NDArray[np.float64]] = None,
+    number_spins: Optional[int] = None,
+) -> Tuple[float, float]:
+    if weights is None and number_spins is None:
+        raise ValueError("'weights' and 'number_spins' cannot be both None")
+    if number_spins is None:
+        number_spins = len(weights)
+    if weights is None:
+        weights = np.ones(number_spins, dtype=np.float64)
+
+    predicted_signs = extract_signs_from_bits(predicted, number_spins)
+    exact_signs = extract_signs_from_bits(exact, number_spins)
+    accuracy = np.mean(exact_signs == predicted_signs)
+    accuracy = max(accuracy, 1 - accuracy)
+    overlap = abs(np.dot(exact_signs * predicted_signs, weights / np.sum(weights)))
+    return accuracy, overlap
+
+
+def solve_ising_model(
+    model: IsingModel,
+    seed: int = 12345,
+    number_sweeps: int = 5120,
+    repetitions: int = 64,
+    only_best: bool = True,
+) -> NDArray[np.uint64]:
+    x, e = sa.anneal(
+        model.ising_model,
+        seed=seed,
+        number_sweeps=number_sweeps,
+        repetitions=repetitions,
+        only_best=only_best,
+    )
+    return x
+
+
+@dataclass
+class SamplingResult:
+    spins: NDArray[np.uint64]
+    weights: NDArray[np.float64]
+
+
+def monte_carlo_sampling(
+    states: NDArray[np.uint64],
+    ground_state: NDArray[np.float64],
+    number_samples: int,
+    sampled_power: float = 2,
+) -> SamplingResult:
+    p = np.abs(ground_state) ** sampled_power
+    p /= np.sum(p)
+    indices = np.random.choice(len(states), size=number_samples, replace=True, p=p)
+    return SamplingResult(spins=states[indices], weights=p[indices])
+
+
+def create_small_cluster_around_point(
+    s0: int,
+    hamiltonian: ls.Operator,
+    required_size: int = 20,
+    keep_probability: float = 0.5,
+) -> List[int]:
+    assert hamiltonian.basis.number_spins <= 64
+    s0 = int(s0)
+    spins = {s0}
+
+    def children_of(s):
+        xs, _ = hamiltonian.apply(s)
+        if xs.ndim > 1:
+            xs = xs[:, 0]
+        children = []
+        for x in xs:
+            if x in spins:
+                continue
+            if np.random.rand() <= keep_probability:
+                children.append(int(x))
+        return children
+
+    children = children_of(s0)
+    while len(spins) < required_size and len(children) > 0:
+        new_children = set()
+        for child in children:
+            spins.add(child)
+            if len(spins) >= required_size:
+                break
+            new_children |= set(children_of(child))
+        children = new_children
+
+    return sorted(list(spins))
+
+
 def extract_classical_ising_model(
     spins: np.ndarray,
     hamiltonian: ls.Operator,
@@ -306,25 +510,18 @@ def extract_classical_ising_model(
         How to scale external fields, set it to `0` if you wish to ignore
         external fields.
     """
-    spins = np.asarray(spins, dtype=np.uint64, order="C")
-    if spins.ndim == 1:
-        spins = np.hstack([spins.reshape(-1, 1), np.zeros((spins.shape[0], 7), dtype=np.uint64)])
-    elif spins.ndim == 2:
-        if spins.shape[1] != 8:
-            raise ValueError("'x' has wrong shape: {}; expected (?, 8)".format(x.shape))
-        spins = np.ascontiguousarray(spins)
-    else:
-        raise ValueError("'x' has wrong shape: {}; expected a 2D array".format(x.shape))
+    spins = _normalize_spins(spins)
     # If spins come from Monte Carlo sampling, there might be duplicates.
     is_from_monte_carlo = monte_carlo_weights is not None
     spins, indices, counts = np.unique(spins, return_index=True, return_counts=True, axis=0)
     if not is_from_monte_carlo and np.any(counts != 1):
         raise ValueError("'spins' contains duplicate spin configurations")
     if is_from_monte_carlo:
+        assert False
         monte_carlo_weights = monte_carlo_weights[indices]
         monte_carlo_weights /= np.sum(monte_carlo_weights)
 
-    def forward(x: np.ndarray) -> np.ndarray:
+    def forward(x: NDArray[np.uint64]) -> NDArray[np.complex128]:
         assert isinstance(x, np.ndarray) and x.dtype == np.uint64
         r = log_coeff_fn(x)
         assert r.shape == (x.shape[0],) and r.dtype == np.complex128
@@ -410,11 +607,15 @@ def extract_classical_ising_model(
 
     x0 = np.empty((spins.shape[0] + 63) // 64, dtype=np.uint64)
     _build_matrix.lib.extract_signs(
-        n, ffi.from_buffer("double const[]", ψs), ffi.from_buffer("uint64_t const[]", x0),
+        n,
+        ffi.from_buffer("double const[]", ψs),
+        ffi.from_buffer("uint64_t const[]", x0),
     )
 
     logger.debug(
-        "The classical Hamiltonian has dimension {} and contains {} non-zero elements.", n, written,
+        "The classical Hamiltonian has dimension {} and contains {} non-zero elements.",
+        n,
+        written,
     )
     logger.debug("Jₘᵢₙ = {}, Jₘₐₓ = {}", np.abs(matrix.data).min(), np.abs(matrix.data).max())
     logger.debug("Bₘᵢₙ = {}, Bₘₐₓ = {}", np.abs(field).min(), np.abs(field).max())
@@ -430,102 +631,18 @@ def extract_signs_from_bits(bits: np.ndarray, number_spins: int) -> np.ndarray:
     return signs
 
 
-def load_ground_state(filename: str):
+def load_ground_state(filename: str) -> Tuple[NDArray[np.float64], float, NDArray[np.uint64]]:
     with h5py.File(filename, "r") as f:
-        ground_state = f["/hamiltonian/eigenvectors"][:]
+        ground_state = np.asarray(f["/hamiltonian/eigenvectors"], dtype=np.float64)
         ground_state = ground_state.squeeze()
         if ground_state.ndim > 1:
             ground_state = ground_state[0, :]
-        energy = f["/hamiltonian/eigenvalues"][0]
-        basis_representatives = f["/basis/representatives"][:]
+        energy = float(f["/hamiltonian/eigenvalues"][0])
+        basis_representatives = np.asarray(f["/basis/representatives"], dtype=np.uint64)
     return ground_state, energy, basis_representatives
 
 
-# def normalize(mx):
-#     """Row-normalize sparse matrix"""
-#     # scale = torch.diag(mx.sum(dim=1).reciprocal()).to_sparse()
-#     # return torch.mm(scale, mx)
-#     rowsum = np.array(mx.sum(1))
-#     r_inv = np.power(rowsum, -1).flatten()
-#     r_inv[np.isinf(r_inv)] = 0.0
-#     r_mat_inv = scipy.sparse.diags(r_inv)
-#     mx = r_mat_inv.dot(mx)
-#     return mx
-
-
-# def sparse_mx_to_torch_sparse_tensor(sparse_mx):
-#     """Convert a scipy sparse matrix to a torch sparse tensor."""
-#     sparse_mx = sparse_mx.tocoo().astype(np.float32)
-#     indices = torch.from_numpy(np.vstack((sparse_mx.row, sparse_mx.col)).astype(np.int64))
-#     values = torch.from_numpy(sparse_mx.data)
-#     shape = torch.Size(sparse_mx.shape)
-#     return torch.sparse.FloatTensor(indices, values, shape)
-
-
-# def load_graph(filename: str):
-#     with open(filename, "r") as f:
-#         config = yaml.load(f, Loader=yaml.SafeLoader)
-#     n = config["basis"]["number_spins"]
-#     edges = np.array(config["hamiltonian"]["terms"][0]["sites"])
-#     edges = torch.from_numpy(edges)
-#     edges = torch.cat([edges, torch.stack([edges[:, 1], edges[:, 0]], dim=1)], dim=0)
-#     edges = edges.t().contiguous()
-#     return edges
-#     # adj = torch.diag()
-#     # print(adj)
-#     # adj = torch.zeros((n, n))
-#     edges = []
-#     for i in range(n):
-#         for j in range(n):
-#             if i != j:
-#                 edges.append((i, j))
-#         # x = i % 6
-#         # y = i // 6
-#         # edges.append((i, (x - 2 + 6) % 6 + ((y + 2) % 6) * 6))
-#         # edges.append((i, (x - 1 + 6) % 6 + ((y + 2) % 6) * 6))
-#         # edges.append((i, (x - 0 + 6) % 6 + ((y + 2) % 6) * 6))
-#
-#         # edges.append((i, (x - 2 + 6) % 6 + ((y + 1) % 6) * 6))
-#         # edges.append((i, (x - 1 + 6) % 6 + ((y + 1) % 6) * 6))
-#         # edges.append((i, (x - 0 + 6) % 6 + ((y + 1) % 6) * 6))
-#         # edges.append((i, (x + 1 + 6) % 6 + ((y + 1) % 6) * 6))
-#
-#         # edges.append((i, (x - 2 + 6) % 6 + ((y + 0) % 6) * 6))
-#         # edges.append((i, (x - 1 + 6) % 6 + ((y + 0) % 6) * 6))
-#         # # edges.append((i, (x - 0 + 6) % 6 + ((y + 0) % 6) * 6))
-#         # edges.append((i, (x + 1 + 6) % 6 + ((y + 0) % 6) * 6))
-#         # edges.append((i, (x + 2 + 6) % 6 + ((y + 0) % 6) * 6))
-#
-#         # edges.append((i, (x - 1 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
-#         # edges.append((i, (x - 0 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
-#         # edges.append((i, (x + 1 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
-#         # edges.append((i, (x + 2 + 6) % 6 + ((y - 1 + 6) % 6) * 6))
-#
-#         # edges.append((i, (x - 0 + 6) % 6 + ((y - 2 + 6) % 6) * 6))
-#         # edges.append((i, (x + 1 + 6) % 6 + ((y - 2 + 6) % 6) * 6))
-#         # edges.append((i, (x + 2 + 6) % 6 + ((y - 2 + 6) % 6) * 6))
-#
-#     adj = torch.zeros((n, n))
-#     for i in range(len(edges)):
-#         adj[edges[i][0], edges[i][1]] = 1
-#     # adj = adj + adj.t() + torch.eye(n)
-#     print(adj.sum(dim=1))
-#     assert torch.all(adj == adj.t())
-#     return adj
-#     # edges = torch.cat([edges, torch.stack([edges[:, 1], edges[:, 0]], dim=1)], dim=0).to(torch.long)
-#     # return edges.t().contiguous()
-#     # return torch.from_numpy(edges.T).contiguous().to(torch.long)
-#     adj = scipy.sparse.coo_matrix(
-#         (np.ones(edges.shape[0]), (edges[:, 0], edges[:, 1])), shape=(n, n)
-#     )
-#     adj = adj + adj.T + scipy.sparse.eye(n)
-#     adj = normalize(adj).tocoo().astype(np.float32)
-#     return torch.sparse_coo_tensor(
-#         torch.from_numpy(np.vstack((adj.row, adj.col))), torch.from_numpy(adj.data), (n, n)
-#     ).coalesce()
-
-
-def load_hamiltonian(filename: str):
+def load_hamiltonian(filename: str) -> ls.Operator:
     with open(filename, "r") as f:
         config = yaml.load(f, Loader=yaml.SafeLoader)
     basis = ls.SpinBasis.load_from_yaml(config["basis"])
@@ -550,69 +667,3 @@ def ground_state_to_log_coeff_fn(ground_state: np.ndarray, basis: ls.SpinBasis):
         return a + 1j * b
 
     return log_coeff_fn
-
-
-# def extract_classical_ising_model(spins, hamiltonian, log_ψ, sampled: bool = False):
-#     logger.info("Constructing classical Ising model...")
-#     spins = np.asarray(spins, dtype=np.uint64, order="C")
-#     if spins.ndim < 2:
-#         spins = spins.reshape(-1, 1)
-#     spins, counts = np.unique(spins, return_counts=True, axis=0)
-#     if not sampled:
-#         assert np.all(counts == 1)
-#     ψs = log_ψ(spins).numpy().squeeze(axis=1)
-#     spins = [_ls_bits512_to_int(σ) for σ in spins]
-#     spins_set = set(spins)
-#
-#     other_spins, coeffs, part_lengths = batched_apply(spins, hamiltonian)
-#     assert np.allclose(coeffs.imag, 0)
-#     coeffs = coeffs.real
-#     other_ψs = log_ψ(other_spins).numpy().squeeze(axis=1)
-#     other_spins = [_ls_bits512_to_int(σ) for σ in other_spins]
-#
-#     scale = np.max(other_ψs.real)
-#     other_ψs.real -= scale
-#     other_ψs = np.exp(other_ψs)
-#     ψs.real -= scale
-#     ψs = np.exp(ψs)
-#     assert np.allclose(ψs.imag, 0)
-#
-#     matrix = []
-#     field = np.zeros(len(spins), dtype=np.float64)
-#
-#     offset = 0
-#     x0 = np.zeros((len(spins) + 63) // 64, dtype=np.uint64)
-#     for i, σ in enumerate(spins):
-#         ψ = ψs[i]
-#         if ψ > 0:
-#             x0[i // 64] |= np.uint64(1) << np.uint64(i % 64)
-#         for (other_σ, c, other_ψ) in zip(
-#             other_spins[offset : offset + part_lengths[i]],
-#             coeffs[offset : offset + part_lengths[i]],
-#             other_ψs[offset : offset + part_lengths[i]],
-#         ):
-#             assert np.isclose(other_ψ.imag, 0)
-#             if other_σ in spins_set:
-#                 j = spins.index(other_σ)
-#                 if sampled:
-#                     matrix.append((i, j, c * counts[i] * abs(other_ψ.real) / abs(ψ.real)))
-#                 else:
-#                     matrix.append((i, j, c * abs(other_ψ.real) * abs(ψ.real)))
-#             else:
-#                 if sampled:
-#                     field[i] += c * counts[i] * other_ψ.real / abs(ψ.real)
-#                 else:
-#                     field[i] += c * other_ψ.real * abs(ψ.real)
-#         offset += part_lengths[i]
-#     Jmax = max(map(lambda t: abs(t[2]), matrix))
-#     matrix = list(filter(lambda t: abs(t[2]) > 1e-8 * Jmax, matrix))
-#
-#     logger.info("len(matrix) = {}", len(matrix))
-#     matrix = scipy.sparse.coo_matrix(
-#         ([d for (_, _, d) in matrix], ([i for (i, _, _) in matrix], [j for (_, j, _) in matrix])),
-#         shape=(len(field), len(field)),
-#     )
-#     spins = np.stack([_int_to_ls_bits512(σ) for σ in spins])
-#     h = sa.Hamiltonian(matrix, field)
-#     logger.info("Done!")
-#     return h, spins, x0
