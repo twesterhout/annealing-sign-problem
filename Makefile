@@ -17,7 +17,7 @@ small: experiments/heisenberg_kagome_16.csv \
 	experiments/sk_16_2.csv \
 	experiments/sk_16_3.csv
 
-experiments/%.csv: ed
+experiments/%.csv: physical_systems/data-small/%.h5
 	$(PYTHON) experiments/full_hilbert_space.py \
 		--hdf5 physical_systems/data-small/$(*F).h5 \
 		--yaml physical_systems/$(*F).yaml \
