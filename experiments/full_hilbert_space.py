@@ -174,7 +174,7 @@ class Simulation:
 
         accuracy_prob = np.mean(results[:, 0] > accuracy_threshold)
         overlap_prob = np.mean(results[:, 1] > overlap_threshold)
-        residual_prob = np.mean(results[:, 2] > residual_threshold)
+        residual_prob = np.mean(results[:, 2] <= residual_threshold)
         return (accuracy_prob, overlap_prob, residual_prob)
 
     # def summary(
@@ -200,6 +200,7 @@ class Simulation:
     #             f.write("{},{},{}\n".format(r["accuracy"], r["overlap"], r["energy_error"]))
 
     def run(self, number_sweeps: int, repetitions: int, seed=None, **kwargs):
+        tick = time.time()
         (xs, es) = sa.anneal(
             self.exact_model.ising_hamiltonian,
             seed=seed,
@@ -207,6 +208,8 @@ class Simulation:
             repetitions=repetitions,
             only_best=False,
         )
+        tock = time.time()
+        logger.debug("{} repetitions took {:.2f} seconds", repetitions, tock - tick)
         return self._analyze(xs, es, **kwargs)
 
 
@@ -224,6 +227,13 @@ def parse_command_line():
 
 def main():
     args = parse_command_line()
+    if os.path.exists(args.output):
+        logger.error(
+            "Output file '{}' already exists: refusing to overwrite; "
+            "delete it manually if this is what you really want",
+            args.output,
+        )
+        return
 
     yaml_filename = args.yaml
     if args.hdf5 is not None:
@@ -238,29 +248,54 @@ def main():
     with open(args.output, "w") as f:
         columns = [
             "number_sweeps",
-            "accuracy_prob",
-            "accuracy_err",
-            "overlap_prob",
-            "overlap_err",
-            "residual_prob",
-            "residual_err",
+            "acc_prob_mean",
+            "acc_prob_std",
+            "acc_prob_median",
+            "acc_prob_min",
+            "acc_prob_max",
+            "overlap_prob_mean",
+            "overlap_prob_std",
+            "overlap_prob_median",
+            "overlap_prob_min",
+            "overlap_prob_max",
+            "residual_prob_mean",
+            "residual_prob_std",
+            "residual_prob_median",
+            "residual_prob_min",
+            "residual_prob_max",
         ]
         f.write(",".join(columns) + "\n")
+
     for number_sweeps in sweeps:
         results = np.zeros((args.trials, 3), dtype=np.float64)
         for trial in range(args.trials):
+            logger.info(
+                "[{}/{}] Running Simulated Annealing for {} sweeps...",
+                trial + 1,
+                args.trials,
+                number_sweeps,
+            )
             results[trial] = simulation.run(number_sweeps, args.repetitions)
         with open(args.output, "a") as f:
-            s = "{},{},{},{},{},{},{}\n".format(
+            columns = [
                 number_sweeps,
                 np.mean(results[:, 0]),
                 np.std(results[:, 0]),
+                np.median(results[:, 0]),
+                np.min(results[:, 0]),
+                np.max(results[:, 0]),
                 np.mean(results[:, 1]),
                 np.std(results[:, 1]),
+                np.median(results[:, 1]),
+                np.min(results[:, 1]),
+                np.max(results[:, 1]),
                 np.mean(results[:, 2]),
                 np.std(results[:, 2]),
-            )
-            f.write(s)
+                np.median(results[:, 2]),
+                np.min(results[:, 2]),
+                np.max(results[:, 2]),
+            ]
+            f.write(",".join(map(str, columns)) + "\n")
 
 
 if __name__ == "__main__":

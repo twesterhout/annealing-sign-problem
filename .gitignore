@@ -5,3 +5,4 @@
 *.log
 *.sif
 __pycache__/
+*.pt

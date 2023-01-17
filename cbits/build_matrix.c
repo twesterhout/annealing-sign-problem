@@ -1,8 +1,8 @@
+#include "build_matrix.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "build_matrix.h"
 
 static int ls_bits512_cmp(void const *_a, void const *_b) {
   ls_bits512 const *const a = _a;
@@ -19,7 +19,7 @@ static int ls_bits512_cmp(void const *_a, void const *_b) {
   return 0;
 }
 
-__attribute__((visibility("default"))) uint64_t build_matrix(
+uint64_t build_matrix(
     uint64_t const num_spins, ls_bits512 const spins[],
     int64_t const *restrict counts, double const *restrict psi,
     ls_bits512 const *restrict other_spins, double const *restrict other_coeffs,
@@ -64,9 +64,8 @@ __attribute__((visibility("default"))) uint64_t build_matrix(
   // return new_size;
 }
 
-__attribute__((visibility("default"))) void
-extract_signs(uint64_t const num_spins, double const *restrict psi,
-              uint64_t *restrict signs) {
+void extract_signs(uint64_t const num_spins, double const *restrict psi,
+                   uint64_t *restrict signs) {
   uint64_t num_words = (num_spins + (64 - 1)) / 64;
   memset(signs, 0, sizeof(uint64_t) * num_words);
   for (uint64_t i = 0; i < num_spins; ++i) {

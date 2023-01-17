@@ -29,6 +29,8 @@ hamiltonian:
                 f.write("      sites: [[{}, {}]]\n".format(i, j))
 
         f.write("observables: []\n")
+        f.write("number_vectors: 1\n")
+        f.write("max_primme_basis_size: 4\n")
         f.write("output: \"{}\"\n".format(output.replace(".yaml", ".h5")))
 
 if __name__ == '__main__':
@@ -36,3 +38,4 @@ if __name__ == '__main__':
     generate_yaml(16, "sk_16_1.yaml")
     generate_yaml(16, "sk_16_2.yaml")
     generate_yaml(16, "sk_16_3.yaml")
+    generate_yaml(32, "sk_32_1.yaml")

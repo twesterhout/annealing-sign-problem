@@ -1,7 +1,7 @@
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import h5py
 import ising_glass_annealer as sa
@@ -11,6 +11,7 @@ import scipy.sparse
 import yaml
 from loguru import logger
 from numpy.typing import NDArray
+from scipy.sparse.csgraph import connected_components
 
 import _build_matrix
 from _build_matrix import ffi
@@ -285,6 +286,10 @@ class IsingModel:
     ising_hamiltonian: sa.Hamiltonian
     initial_signs: NDArray[np.uint64]
 
+    @property
+    def size(self):
+        return self.spins.shape[0]
+
 
 def _normalize_spins(spins) -> NDArray[np.uint64]:
     spins = np.asarray(spins, dtype=np.uint64, order="C")
@@ -303,7 +308,7 @@ def make_ising_model(
     spins: NDArray[np.uint64],
     quantum_hamiltonian: ls.Operator,
     log_psi: Optional[NDArray[np.float64]] = None,
-    log_psi_fn: Optional[Callable[[NDArray[np.float64]], NDArray[np.float64]]] = None,
+    log_psi_fn: Optional[Callable[[NDArray[np.uint64]], NDArray[np.float64]]] = None,
     external_field: bool = False,
     debug: bool = True,
 ):
@@ -343,6 +348,7 @@ def make_ising_model(
     if not np.allclose(psi.imag, 0, atol=1e-6):
         raise ValueError("expected all wavefunction coefficients to be real")
     psi = np.ascontiguousarray(psi.real)
+    psi /= np.linalg.norm(psi)
     other_psi = np.where(belong_to_spins, psi[other_indices], 0)
 
     offsets = np.zeros(n + 1, dtype=np.int64)
@@ -379,10 +385,16 @@ def make_ising_model(
 
     if debug:
         assert np.all(ref_spins[:, 0] == spins)
-        assert np.all(ref_h.exchange.row == ising_hamiltonian.exchange.row)
-        assert np.all(ref_h.exchange.col == ising_hamiltonian.exchange.col)
-        assert np.allclose(ref_h.exchange.data, ising_hamiltonian.exchange.data)
-        assert np.allclose(ref_h.field, ising_hamiltonian.field)
+        ref_exchange = ref_h.exchange.tocoo()
+        exchange = ising_hamiltonian.exchange.tocoo()
+        assert np.all(ref_exchange.row == exchange.row)
+        assert np.all(ref_exchange.col == exchange.col)
+        if not np.allclose(ref_exchange.data, exchange.data):
+            print(ref_exchange.data)
+            print(exchange.data)
+            assert False
+        if external_field:
+            assert np.allclose(ref_h.field, ising_hamiltonian.field)
         assert np.all(ref_x0 == x0)
     return IsingModel(spins, quantum_hamiltonian, ising_hamiltonian, x0)
 
@@ -416,7 +428,7 @@ def solve_ising_model(
     only_best: bool = True,
 ) -> NDArray[np.uint64]:
     x, e = sa.anneal(
-        model.ising_model,
+        model.ising_hamiltonian,
         seed=seed,
         number_sweeps=number_sweeps,
         repetitions=repetitions,
@@ -428,7 +440,7 @@ def solve_ising_model(
 @dataclass
 class SamplingResult:
     spins: NDArray[np.uint64]
-    weights: NDArray[np.float64]
+    weights: Optional[NDArray[np.float64]]
 
 
 def monte_carlo_sampling(
@@ -440,7 +452,7 @@ def monte_carlo_sampling(
     p = np.abs(ground_state) ** sampled_power
     p /= np.sum(p)
     indices = np.random.choice(len(states), size=number_samples, replace=True, p=p)
-    return SamplingResult(spins=states[indices], weights=p[indices])
+    return SamplingResult(spins=states[indices], weights=None)  # p[indices])
 
 
 def create_small_cluster_around_point(
@@ -476,6 +488,110 @@ def create_small_cluster_around_point(
         children = new_children
 
     return sorted(list(spins))
+
+
+def make_hamiltonian_extension(
+    model: IsingModel,
+    log_psi_fn: Callable[[NDArray[np.uint64]], NDArray[np.float64]],
+) -> IsingModel:
+    spins, _, _ = model.quantum_hamiltonian.batched_apply(model.spins)
+    spins = np.unique(spins, axis=0)
+    return make_ising_model(spins, model.quantum_hamiltonian, log_psi_fn=log_psi_fn)
+
+
+def get_strongest_couplings(matrix: scipy.sparse.spmatrix) -> NDArray[Any]:
+    matrix = matrix.tocsr()
+    largest_couplings = matrix.max(axis=1).toarray().squeeze(axis=1)
+    smallest_couplings = matrix.min(axis=1).toarray().squeeze(axis=1)
+    print(largest_couplings.shape, matrix.shape)
+    assert len(largest_couplings) == matrix.shape[0]
+    assert len(smallest_couplings) == matrix.shape[0]
+    return np.maximum(np.abs(smallest_couplings), largest_couplings)
+
+
+def sparsify_based_on_cutoff(model: IsingModel, cutoff: float) -> IsingModel:
+    matrix = model.ising_hamiltonian.exchange.tocsr().copy()
+    strongest = get_strongest_couplings(matrix)
+    for i in range(matrix.shape[0]):
+        row = matrix.data[matrix.indptr[i] : matrix.indptr[i + 1]]
+        row[np.abs(row) < cutoff * strongest[i]] = 0
+    matrix.eliminate_zeros()
+    matrix = matrix.tocoo()
+    logger.debug("Constructing sa.Hamiltonian")
+    ising_hamiltonian = sa.Hamiltonian(matrix, model.ising_hamiltonian.field)
+    logger.debug("Done constructing sa.Hamiltonian")
+    new_model = IsingModel(
+        model.spins,
+        model.quantum_hamiltonian,
+        ising_hamiltonian,
+        model.x0,
+    )
+    print("Hello")
+    logger.debug("Built new model")
+
+
+def optimize_signs_on_cluster(
+    cluster: SamplingResult,
+    quantum_hamiltonian: ls.Operator,
+    log_psi_fn: Callable[[NDArray[np.uint64]], NDArray[np.float64]],
+    extension_order: int,
+    cutoff: float,
+    number_sweeps: int = 5192,
+    repetitions: int = 64,
+):
+    h = make_ising_model(cluster.spins, quantum_hamiltonian, log_psi_fn=log_psi_fn)
+    x = solve_ising_model(h, seed=None, number_sweeps=number_sweeps, repetitions=repetitions)
+    results = [x]
+    logger.debug("Starting with a cluster of {} spins", h.size)
+
+    for i in range(extension_order):
+        h = make_hamiltonian_extension(h, log_psi_fn)
+        logger.debug("Extension №{}: there are now {} spins in the cluster", i + 1, h.size)
+        h = sparsify_based_on_cutoff(h, cutoff=cutoff)
+        logger.debug("After sparsifying: {} spins in the cluster", h.size)
+        number_components, _ = connected_components(h.ising_hamiltonian.exchange, directed=False)
+        assert number_components == 1
+        # x = solve_ising_model(h, seed=None, number_sweeps=number_sweeps, repetitions=repetitions)
+        indices = np.searchsorted(h.spins, cluster.spins)
+        assert np.all(h.spins[indices] == cluster.spins)
+        signs = extract_signs_from_bits(x, number_spins=h.size)
+        part = extract_bits_from_signs(signs[indices])
+        results.append(part)
+
+    return results
+
+
+def signs_to_bits(signs: NDArray[Any]) -> NDArray[np.uint64]:
+    signs = np.sign(signs)
+    mask = signs == 1
+    assert np.all(mask | (signs == -1))
+    bits = np.packbits(mask, axis=-1, bitorder="little")
+    rem = len(bits) % 8
+    if rem != 0:
+        bits = np.pad(bits, ((0, 8 - rem),))
+    return bits.view(np.uint64)
+
+
+def dump_ising_model_to_hdf5(model: IsingModel, ground_state: NDArray[np.float64], filename: str):
+    matrix = model.ising_hamiltonian.exchange
+    # offset = np.sum(matrix.diagonal())
+    # matrix.setdiag(np.zeros(model.size))
+    matrix = matrix.tocsr()
+    field = model.ising_hamiltonian.field
+
+    x = np.sign(ground_state)
+    print(np.dot(x, matrix @ x))
+    energy = model.quantum_hamiltonian.expectation(ground_state).real
+    print(energy)
+
+    with h5py.File(filename, "w") as out:
+        out["elements"] = np.asarray(matrix.data, dtype=np.float64)
+        out["indices"] = np.asarray(matrix.indices, dtype=np.int32)
+        out["indptr"] = np.asarray(matrix.indptr, dtype=np.int32)
+        out["field"] = np.asarray(field, dtype=np.float64)
+        out["energy"] = energy
+        # out["offset"] = offset
+        out["signs"] = signs_to_bits(ground_state)
 
 
 def extract_classical_ising_model(
@@ -620,6 +736,20 @@ def extract_classical_ising_model(
     logger.debug("Jₘᵢₙ = {}, Jₘₐₓ = {}", np.abs(matrix.data).min(), np.abs(matrix.data).max())
     logger.debug("Bₘᵢₙ = {}, Bₘₐₓ = {}", np.abs(field).min(), np.abs(field).max())
     return h, spins, x0, counts
+
+
+def extract_bits_from_signs(signs: NDArray[np.float64]) -> NDArray[np.uint64]:
+    signs = np.asarray(signs, dtype=np.float64)
+    if signs.ndim != 1:
+        raise ValueError("signs has invalid shape: {}".format(signs.shape))
+    n = len(signs)
+    out = np.empty((n + 63) // 64, dtype=np.uint64)
+    _build_matrix.lib.extract_signs(
+        n,
+        ffi.from_buffer("double const[]", signs),
+        ffi.from_buffer("uint64_t const[]", out),
+    )
+    return out
 
 
 def extract_signs_from_bits(bits: np.ndarray, number_spins: int) -> np.ndarray:
