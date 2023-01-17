@@ -1,0 +1,20 @@
+name: annealing_experiments
+channels:
+  - defaults
+  - twesterhout
+dependencies:
+  - python=3.9
+  - pip
+  - ising-glass-annealer =0.4.0.1
+  - lattice-symmetries =0.8.3
+  - cffi
+  - h5py
+  - pyyaml
+  - networkx
+  - numpy
+  - scipy
+  - loguru
+  # Tools for development
+  - black
+  - isort
+  - mypy
