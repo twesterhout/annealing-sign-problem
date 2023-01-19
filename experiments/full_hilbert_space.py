@@ -13,6 +13,7 @@ from annealing_sign_problem import *
 
 
 class Simulation:
+    log_coeff_fn: Any
     exact_model: IsingModel
     ground_state: NDArray[np.float64]
     energy: float
@@ -24,14 +25,14 @@ class Simulation:
         basis.build(_representatives)
         logger.debug("Ground state energy is", ground_state_energy)
 
-        log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
+        self.log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
         # classical_hamiltonian, spins, x_exact, counts = extract_classical_ising_model(
         #     hamiltonian.basis.states, hamiltonian, log_coeff_fn
         # )
         # assert np.all(spins[:, 0] == hamiltonian.basis.states)
 
         self.exact_model = make_ising_model(
-            hamiltonian.basis.states, hamiltonian, log_psi_fn=log_coeff_fn
+            hamiltonian.basis.states, hamiltonian, log_psi_fn=self.log_coeff_fn
         )
         self.ground_state = ground_state
         self.energy = ground_state_energy
@@ -164,7 +165,8 @@ class Simulation:
     ):
         count = len(xs)
         results = np.zeros((count, 3), dtype=np.float64)
-        weights = self.ground_state
+        weights = self.ground_state**2
+        weights /= np.sum(weights)
         for i, (x, e) in enumerate(zip(xs, es)):
             accuracy, overlap = compute_accuracy_and_overlap(
                 predicted=x, exact=self.exact_model.initial_signs, weights=weights
@@ -201,15 +203,55 @@ class Simulation:
 
     def run(self, number_sweeps: int, repetitions: int, seed=None, **kwargs):
         tick = time.time()
-        (xs, es) = sa.anneal(
-            self.exact_model.ising_hamiltonian,
-            seed=seed,
-            number_sweeps=number_sweeps,
-            repetitions=repetitions,
-            only_best=False,
+        # (xs, es) = sa.anneal(
+        #     self.exact_model.ising_hamiltonian,
+        #     seed=seed,
+        #     number_sweeps=number_sweeps,
+        #     repetitions=repetitions,
+        #     only_best=False,
+        # )
+        x = strongest_coupling_greedy_color(
+            self.exact_model.spins,
+            self.exact_model.quantum_hamiltonian,
+            self.ground_state,
+            frozen_spins=self.exact_model.quantum_hamiltonian.basis.states,
         )
+        # x = color_via_spanning_tree(
+        #     self.exact_model.spins,
+        #     self.exact_model.quantum_hamiltonian,
+        #     self.ground_state,
+        #     frozen_spins=self.exact_model.quantum_hamiltonian.basis.states,
+        # )
         tock = time.time()
         logger.debug("{} repetitions took {:.2f} seconds", repetitions, tock - tick)
+
+        n = len(self.ground_state)
+        weights = self.ground_state**2
+        weights /= np.sum(weights)
+
+        mask = sa.bits_to_signs(x, n) != sa.bits_to_signs(self.exact_model.initial_signs, n)
+        if np.mean(mask) > 0.5:
+            mask = np.invert(mask)
+        print(np.mean(mask))
+
+        wrong_spins = self.exact_model.spins[mask]
+        model = make_ising_model(
+            wrong_spins, self.exact_model.quantum_hamiltonian, log_psi_fn=self.log_coeff_fn
+        )
+        number_components, component_indices = connected_components(
+            model.ising_hamiltonian.exchange, directed=False
+        )
+
+        accuracy, overlap = compute_accuracy_and_overlap(
+            predicted=x, exact=self.exact_model.initial_signs, weights=weights
+        )
+        logger.info("Accuracy: {}, overlap: {}", accuracy, overlap)
+        logger.info("Number components: {}", number_components)
+        sizes = [np.sum(component_indices == i) for i in range(number_components)]
+        logger.info("Number sizes: {}", sorted(sizes, reverse=True))
+
+        exit(0)
+
         return self._analyze(xs, es, **kwargs)
 
 

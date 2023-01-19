@@ -1,11 +1,12 @@
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import h5py
 import ising_glass_annealer as sa
 import lattice_symmetries as ls
+import networkx
 import numpy as np
 import scipy.sparse
 import yaml
@@ -279,6 +280,32 @@ from _build_matrix import ffi
 #     }
 
 
+class AlmostInfiniteGraph:
+    quantum_hamiltonian: ls.Operator
+    ground_state: NDArray[np.float64]
+
+    def __init__(self, quantum_hamiltonian, ground_state):
+        self.quantum_hamiltonian = quantum_hamiltonian
+        self.ground_state = ground_state
+
+    def neighbours(self, spin: int):
+        other_spins, other_coeffs = self.quantum_hamiltonian.apply(spin)
+        if not np.allclose(other_coeffs.imag, 0, atol=1e-6):
+            raise ValueError("expected all Hamiltonian matrix elements to be real")
+        other_coeffs = other_coeffs.real
+        if other_spins.ndim > 1:
+            other_spins = other_spins[:, 0]
+
+        basis = self.quantum_hamiltonian.basis
+        psi = np.abs(self.ground_state[basis.index(spin)])
+        other_psis = np.abs(self.ground_state[basis.batched_index(other_spins)])
+
+        nodes = other_spins.tolist()
+        edges = (psi * other_coeffs * other_psis).tolist()
+
+        return sorted(zip(nodes, edges), reverse=True, key=lambda t: abs(t[1]))
+
+
 @dataclass
 class IsingModel:
     spins: NDArray[np.uint64]
@@ -310,7 +337,7 @@ def make_ising_model(
     log_psi: Optional[NDArray[np.float64]] = None,
     log_psi_fn: Optional[Callable[[NDArray[np.uint64]], NDArray[np.float64]]] = None,
     external_field: bool = False,
-    debug: bool = True,
+    debug: bool = False,
 ):
     if debug:
         ref_h, ref_spins, ref_x0, ref_counts = extract_classical_ising_model(
@@ -360,7 +387,7 @@ def make_ising_model(
     for i in range(n):
         elements[offsets[i] : offsets[i + 1]] *= np.abs(psi[i])
     tock = time.time()
-    logger.debug("Python for loop took {:.2} seconds", tock - tick)
+    # logger.debug("Python for loop took {:.2} seconds", tock - tick)
 
     matrix = scipy.sparse.csr_matrix((elements, other_indices, offsets), shape=(n, n))
     matrix = 0.5 * (matrix + matrix.T)
@@ -381,7 +408,7 @@ def make_ising_model(
         ffi.from_buffer("uint64_t const[]", x0),
     )
     end_time = time.time()
-    logger.debug("Building the Ising model took {:.2} seconds", end_time - start_time)
+    # logger.debug("Building the Ising model took {:.2} seconds", end_time - start_time)
 
     if debug:
         assert np.all(ref_spins[:, 0] == spins)
@@ -455,6 +482,358 @@ def monte_carlo_sampling(
     return SamplingResult(spins=states[indices], weights=None)  # p[indices])
 
 
+def determine_exact_solution(spins, quantum_hamiltonian, ground_state):
+    indices = quantum_hamiltonian.basis.batched_index(spins)
+    psi = ground_state[indices]
+    return sa.signs_to_bits(np.sign(psi))
+
+
+def compute_distribution_of_couplings(spins, quantum_hamiltonian, ground_state):
+    infinite_graph = AlmostInfiniteGraph(quantum_hamiltonian, ground_state)
+    histogram = np.zeros(1000, dtype=np.float64)
+    for s in spins:
+        couplings = np.array([c for _, c in infinite_graph.neighbours(s)])
+        histogram[: couplings.size] += couplings
+    histogram /= spins.size
+    return histogram
+
+
+def color_via_spanning_tree(spins, quantum_hamiltonian, ground_state, frozen_spins):
+    log_psi_fn = ground_state_to_log_coeff_fn(ground_state, quantum_hamiltonian.basis)
+    ising = make_ising_model(spins, quantum_hamiltonian, log_psi_fn=log_psi_fn)
+
+    matrix = ising.ising_hamiltonian.exchange.tocoo()
+    matrix.setdiag(np.zeros(spins.size))
+    matrix.eliminate_zeros()
+
+    graph = networkx.from_scipy_sparse_matrix(matrix)
+    assert networkx.is_weighted(graph)
+    tree = networkx.minimum_spanning_tree(graph)
+    colors = networkx.greedy_color(tree, strategy="connected_sequential_dfs")
+    assert max(colors.values()) == 1
+
+    indices = binary_search(ising.spins, frozen_spins)
+    frozen_signs = np.array([2 * colors[s] - 1 for s in indices])
+    return sa.signs_to_bits(frozen_signs)
+
+
+def strongest_coupling_greedy_color(
+    spins, quantum_hamiltonian, ground_state, frozen_spins, number_largest=1
+):
+    log_psi_fn = ground_state_to_log_coeff_fn(ground_state, quantum_hamiltonian.basis)
+    ising = make_ising_model(spins, quantum_hamiltonian, log_psi_fn=log_psi_fn)
+    infinite_graph = AlmostInfiniteGraph(quantum_hamiltonian, ground_state)
+
+    matrix = ising.ising_hamiltonian.exchange.tocoo()
+    matrix.setdiag(np.zeros(spins.size))
+    matrix.eliminate_zeros()
+
+    number_components, _ = connected_components(matrix, directed=False)
+    assert number_components == 1
+
+    def ising_edges():
+        order = np.argsort(np.abs(matrix.data))[::-1]
+        for k in order:
+            s1 = matrix.row[k]
+            s2 = matrix.col[k]
+            if s1 < s2:
+                c = float(matrix.data[k])
+                yield (s1, s2, c)
+
+    @dataclass
+    class Cluster:
+        spins: Set[int]
+        signs: Dict[int, float]
+
+    csr_matrix = matrix.tocsr()
+
+    def merge_energy(cluster1, cluster2):
+        if len(cluster1.spins) > len(cluster2.spins):
+            return merge_energy(cluster2, cluster1)
+        energy = 0
+        for (i1, sign1) in zip(cluster1.spins, cluster1.signs):
+            for k in range(csr_matrix.indptr[i1], csr_matrix.indptr[i1 + 1]):
+                i2 = csr_matrix.indices[k]
+                if i2 in cluster2.spins:
+                    coupling = csr_matrix.data[k]
+                    sign2 = cluster2.signs[i2]
+                    energy += sign1 * sign2 * coupling
+        return energy
+
+    # signs = dict()
+    # np.zeros(spins.size, dtype=np.float64)
+    number_clusters = 0
+    # next_cluster_index = 0
+    # cluster_indices = dict()
+    clusters = dict()
+    # np.full(spins.size, -1, dtype=np.int32)
+
+    for (s1, s2, coupling) in ising_edges():
+        # Both spins already have colors
+        if (s1 in clusters) and (s2 in clusters):
+            cluster1 = clusters[s1]
+            cluster2 = clusters[s2]
+            if cluster1 == cluster2:
+                # Spins belong to the same cluster. There is no reason
+                # to flip spins because all previous couplings were stronger
+                # than our current one
+                pass
+            else:
+                # Check whether we need to flip one of the clusters
+                # should_flip = merge_energy(cluster1, cluster2) > 0
+                is_frustrated = cluster1.signs[s1] * cluster2.signs[s2] * coupling > 0
+                # if is_frustrated != should_flip:
+                #     logger.debug("should_flip and is_frustrated do not agree")
+                should_flip = is_frustrated
+                keys = list(clusters.keys())
+                for key in keys:
+                    if clusters[key] == cluster2:
+                        sign = clusters[key].signs[key]
+                        if should_flip:
+                            sign *= -1
+
+                        clusters[key] = cluster1
+                        cluster1.spins.add(key)
+                        cluster1.signs[key] = sign
+                number_clusters -= 1
+        elif s1 in clusters:
+            cluster1 = clusters[s1]
+            cluster2 = Cluster({s2}, {s2: 1})
+            if merge_energy(cluster2, cluster1) > 0:
+                cluster2.signs[s2] *= -1
+
+            clusters[s2] = cluster1
+            cluster1.spins.add(s2)
+            cluster1.signs[s2] = cluster2.signs[s2]
+
+        elif s2 in clusters:
+            cluster2 = clusters[s2]
+            cluster1 = Cluster({s1}, {s1: 1})
+            if merge_energy(cluster1, cluster2) > 0:
+                cluster1.signs[s1] *= -1
+
+            clusters[s1] = cluster2
+            cluster2.spins.add(s1)
+            cluster2.signs[s1] = cluster1.signs[s1]
+
+        else:
+            # Neither of the spins has a color
+            sign = -int(np.sign(coupling))
+            cluster = Cluster({s1, s2}, {s1: 1, s2: sign})
+            clusters[s1] = cluster
+            clusters[s2] = cluster
+            number_clusters += 1
+
+    # print(number_clusters)
+    # print(cluster_indices)
+
+    assert number_clusters == 1
+    assert len(clusters) == spins.size
+
+    mega_cluster = next(iter(clusters.values()))
+    for cluster in clusters.values():
+        assert mega_cluster == cluster
+
+    signs = mega_cluster.signs
+
+    count = 0
+    while True:
+        changed = False
+        count += 1
+        for s1 in signs.keys():
+            e = 0
+            for k in range(csr_matrix.indptr[s1], csr_matrix.indptr[s1 + 1]):
+                s2 = csr_matrix.indices[k]
+                coupling = csr_matrix.data[k]
+                e += signs[s2] * coupling
+            e *= signs[s1]
+            if e > 0:
+                # logger.debug("{} is locally non-optimal", ising.spins[s1])
+                changed = True
+                signs[s1] *= -1
+        if not changed:
+            break
+    print(count)
+
+    # graph = networkx.Graph()
+    # graph.add_nodes_from(signs.keys())
+
+    # edges = []
+    # for (s1, s2, coupling) in ising_edges():
+    #     if s1 != s2:
+    #         is_frustrated = signs[s1] * signs[s2] * coupling > 0
+    #         if is_frustrated:
+    #             edges.append((s1, s2, coupling))
+    #             graph.add_edge(s1, s2, weight=coupling)
+    # edges = sorted(edges, reverse=True, key=lambda t: abs(t[2]))
+    # components = networkx.connected_components(graph)
+    # print(sorted(map(len, components)))
+
+    # def iteration_strategy(G, colors):
+    #     order = np.argsort(np.abs(matrix.data))[::-1]
+    #     visited = set()
+    #     for k in order:
+    #         s1 = int(ising.spins[matrix.row[k]])
+    #         s2 = int(ising.spins[matrix.col[k]])
+    #         assert s1 != s2
+    #         if s1 not in visited:
+    #             visited.add(s1)
+    #             assert s1 in G
+    #             yield s1
+    #         if s2 not in visited:
+    #             visited.add(s2)
+    #             assert s2 in G
+    #             yield s2
+
+    # g = networkx.Graph()
+    # g.add_nodes_from(spins.tolist())
+    # colors = dict()
+    # for s1 in iteration_strategy(g, colors):
+    #     assert s1 not in colors
+    #     neighbor_colors = []
+    #     for s2, c in infinite_graph.neighbours(s1):
+    #         if s2 != s1 and s2 in g and s2 in colors:
+    #             neighbor_colors.append((colors[s2], c))
+
+    #     if len(neighbor_colors) == 0:
+    #         colors[s1] = 1
+    #     else:
+    #         if sum((s2 * c for s2, c in neighbor_colors)) > 0:
+    #             colors[s1] = -1
+    #         else:
+    #             colors[s1] = 1
+
+    # for s1 in spins:
+    #     count = 0
+    #     for s2, c in infinite_graph.neighbours(s1):
+    #         if s2 != s1 and s2 in g:
+    #             # g.add_node(s2)
+    #             g.add_edge(s1, s2, weight=c)
+    #             g.add_edge(s2, s1, weight=c)
+    #             count += 1
+    #             if count >= number_largest:
+    #                 break
+
+    # g = networkx.Graph()
+    # g.add_nodes_from(spins.tolist())
+    # for k in range(matrix.nnz):
+    #     s1 = int(ising.spins[matrix.row[k]])
+    #     s2 = int(ising.spins[matrix.col[k]])
+    #     g.add_edge(s1, s2)
+    #     g.add_edge(s2, s1)
+
+    # g = networkx.convert_matrix.from_scipy_sparse_matrix(matrix)
+    # colors = networkx.greedy_color(g, strategy=iteration_strategy, interchange=True)
+
+    # for c in set(colors.values()):
+    #     print(c, sum(color == c for color in colors.values()))
+    # print(colors)
+
+    # signs = np.array([2 * colors[s] - 1 for s in frozen_spins])
+    frozen_indices = binary_search(ising.spins, frozen_spins)
+    frozen_signs = np.array([signs[s] for s in frozen_indices])
+    return sa.signs_to_bits(frozen_signs)
+
+
+def strongest_coupling_model(spins, quantum_hamiltonian, ground_state, number_largest: int = 2):
+    infinite_graph = AlmostInfiniteGraph(quantum_hamiltonian, ground_state)
+    basis = quantum_hamiltonian.basis
+    indices = basis.batched_index(spins)
+    signs = np.sign(ground_state)  # [indices])
+
+    g = networkx.Graph()
+    for s1 in spins:
+        g.add_node(s1)
+        count = 0
+        for s2, c in infinite_graph.neighbours(s1):
+            if s2 != s1:
+                g.add_node(s2)
+                g.add_edge(s1, s2, weight=c)
+                g.add_edge(s2, s1, weight=c)
+                count += 1
+                if count >= number_largest:
+                    break
+
+    components = list(networkx.connected_components(g))
+
+    cycles = networkx.cycle_basis(g)
+    cycle_edges = set()
+    for cycle in cycles:
+        for i in range(len(cycle)):
+            s1 = int(cycle[i])
+            s2 = int(cycle[(i + 1) % len(cycle)])
+            cycle_edges.add((s1, s2))
+            cycle_edges.add((s2, s1))
+
+    is_largest_frustrated = np.zeros(spins.size, dtype=np.uint8)
+    is_largest_within = np.zeros(spins.size, dtype=np.uint8)
+    for k in range(spins.size):
+        s1 = int(spins[k])
+        neighbours = infinite_graph.neighbours(s1)
+        count = 0
+        for (s2, c) in neighbours:
+            if s2 != s1:
+                # print(s1, signs[basis.index(s1)], s2, signs[basis.index(s2)], c)
+                if signs[basis.index(s1)] * signs[basis.index(s2)] * c > 0:
+                    is_largest_frustrated[k] = 1
+                    if (int(s1), int(s2)) in cycle_edges:
+                        is_largest_within[k] = 1
+                count += 1
+                if count >= number_largest:
+                    break
+
+    logger.info(
+        "Stats: spins={}, components={}, cycles={}, largest_frustrated={}, largest_in_cycle={}",
+        spins.size,
+        len(components),
+        len(cycles),
+        np.mean(is_largest_frustrated),
+        np.sum(is_largest_within) / np.sum(is_largest_frustrated),
+    )
+
+
+def cluster_statistics(spins, quantum_hamiltonian, ground_state):
+    log_psi_fn = ground_state_to_log_coeff_fn(ground_state, quantum_hamiltonian.basis)
+    ising = make_ising_model(spins, quantum_hamiltonian, log_psi_fn=log_psi_fn)
+
+    signs = sa.bits_to_signs(ising.initial_signs, spins.size)
+    matrix = ising.ising_hamiltonian.exchange.tocoo()
+    matrix.setdiag(np.zeros(spins.size))
+    matrix.eliminate_zeros()
+    number_bonds = matrix.nnz
+
+    is_frustrated = [
+        coupling * signs[i] * signs[j] > 0
+        for (coupling, i, j) in zip(matrix.data, matrix.row, matrix.col)
+    ]
+    is_frustrated = np.asarray(is_frustrated, dtype=np.uint8)
+
+    matrix = matrix.tocsr()
+    positive_matrix = matrix.tocsr().copy()
+    positive_matrix.data = np.abs(positive_matrix.data)
+    largest_coupling_indices = matrix.argmax(axis=1).A.squeeze(axis=1)
+    is_largest_frustrated = [
+        matrix[i, largest_coupling_indices[i]] * signs[i] * signs[largest_coupling_indices[i]] > 0
+        for i in range(spins.size)
+    ]
+    is_largest_frustrated = np.asarray(is_largest_frustrated, dtype=np.uint8)
+
+    # is_largest_frustrated = np.zeros(spins.size, dtype=np.uint8)
+    # is_largest_within = np.zeros(spins.size, dtype=np.uint8)
+    # for k in range(spins.size):
+    #     spin = spins[k]
+    #     neighbours = graph.neighbours(spin)
+    #     for (n, c) in neighbo
+
+    logger.info(
+        "Stats: spins={}, bonds={}, frustrated={}, largest_frustrated={}",
+        spins.size,
+        matrix.nnz,
+        np.mean(is_frustrated),
+        np.mean(is_largest_frustrated),
+    )
+
+
 def create_small_cluster_around_point(
     s0: int,
     hamiltonian: ls.Operator,
@@ -509,25 +888,72 @@ def get_strongest_couplings(matrix: scipy.sparse.spmatrix) -> NDArray[Any]:
     return np.maximum(np.abs(smallest_couplings), largest_couplings)
 
 
-def sparsify_based_on_cutoff(model: IsingModel, cutoff: float) -> IsingModel:
+def binary_search(haystack, needles):
+    assert np.all(np.sort(haystack) == haystack)
+    indices = np.searchsorted(haystack, needles)
+    assert np.all(haystack[indices] == needles)
+    return indices
+
+
+def strategy_largest_coupling_first(G, colors):
+    visited = [False for _ in len(G)]
+
+    pass
+
+
+def solve_by_colouring(model: IsingModel) -> IsingModel:
+    pass
+
+
+def sparsify_based_on_cutoff(model: IsingModel, cutoff: float, frozen_spins) -> IsingModel:
+    frozen_spin_indices = binary_search(model.spins, frozen_spins)
+    is_spin_frozen = np.ones(model.spins.shape, dtype=np.uint8)
+    is_spin_frozen[frozen_spin_indices] = 1
+
     matrix = model.ising_hamiltonian.exchange.tocsr().copy()
+    print(matrix.nnz, np.abs(matrix.data).min(), np.abs(matrix.data).max())
     strongest = get_strongest_couplings(matrix)
+    print(strongest)
+
     for i in range(matrix.shape[0]):
-        row = matrix.data[matrix.indptr[i] : matrix.indptr[i + 1]]
-        row[np.abs(row) < cutoff * strongest[i]] = 0
+        # if i == 0:
+        #     print(matrix.data[matrix.indptr[i] : matrix.indptr[i + 1]])
+        c = cutoff * strongest[i]
+        for k in range(matrix.indptr[i], matrix.indptr[i + 1]):
+            j = matrix.indices[k]
+            if np.abs(matrix.data[k]) < c and (is_spin_frozen[i] & is_spin_frozen[j]) != 0:
+                matrix.data[k] = 0
     matrix.eliminate_zeros()
-    matrix = matrix.tocoo()
-    logger.debug("Constructing sa.Hamiltonian")
-    ising_hamiltonian = sa.Hamiltonian(matrix, model.ising_hamiltonian.field)
-    logger.debug("Done constructing sa.Hamiltonian")
+    matrix = 0.5 * (matrix + matrix.transpose())
+    print(matrix.nnz)
+
+    _, component_indices = connected_components(matrix, directed=False)
+    magic_index = component_indices[frozen_spin_indices[0]]
+    print(component_indices[frozen_spin_indices])
+    assert np.all(component_indices[frozen_spin_indices] == magic_index)
+    mask = component_indices == magic_index
+    print(np.sum(mask))
+
+    spins = model.spins[mask]
+    signs = sa.bits_to_signs(model.initial_signs, model.size)
+    signs = signs[mask]
+    signs = sa.signs_to_bits(signs)
+
+    matrix = matrix[mask][:, mask]
+    print(matrix.shape)
+    field = model.ising_hamiltonian.field[mask]
+
+    # logger.debug("Constructing sa.Hamiltonian")
+    ising_hamiltonian = sa.Hamiltonian(matrix, field)
+    # logger.debug("Done constructing sa.Hamiltonian")
     new_model = IsingModel(
-        model.spins,
+        spins,
         model.quantum_hamiltonian,
         ising_hamiltonian,
-        model.x0,
+        model.initial_signs,
     )
-    print("Hello")
-    logger.debug("Built new model")
+    # logger.debug("Built new model")
+    return new_model
 
 
 def optimize_signs_on_cluster(
@@ -544,21 +970,58 @@ def optimize_signs_on_cluster(
     results = [x]
     logger.debug("Starting with a cluster of {} spins", h.size)
 
+    h_coo = h.ising_hamiltonian.exchange.tocoo()
+    frozen_spins = cluster.spins
+
     for i in range(extension_order):
         h = make_hamiltonian_extension(h, log_psi_fn)
+
+        # graph = networkx.convert_matrix.from_scipy_sparse_matrix(h.ising_hamiltonian.exchange)
+        # print(list(graph.edges())[:100])
+        # print(networkx.is_weighted(graph))
+        # weights = networkx.get_edge_attributes(graph, "weight")
+        # print(list(weights.items())[:100])
+
         logger.debug("Extension №{}: there are now {} spins in the cluster", i + 1, h.size)
-        h = sparsify_based_on_cutoff(h, cutoff=cutoff)
+        h = sparsify_based_on_cutoff(h, cutoff=cutoff, frozen_spins=frozen_spins)
         logger.debug("After sparsifying: {} spins in the cluster", h.size)
-        number_components, _ = connected_components(h.ising_hamiltonian.exchange, directed=False)
+        number_components, component_indices = connected_components(
+            h.ising_hamiltonian.exchange, directed=False
+        )
+        component_sizes = [np.sum(component_indices == k) for k in range(number_components)]
+        # print(sorted(component_sizes))
         assert number_components == 1
-        # x = solve_ising_model(h, seed=None, number_sweeps=number_sweeps, repetitions=repetitions)
-        indices = np.searchsorted(h.spins, cluster.spins)
-        assert np.all(h.spins[indices] == cluster.spins)
+
+        # with h5py.File("test_cluster_{}.h5".format(i), "w") as f:
+        #     f["data"] = h.ising_hamiltonian.exchange.data
+        #     f["indices"] = h.ising_hamiltonian.exchange.indices
+        #     f["indptr"] = h.ising_hamiltonian.exchange.indptr
+        #     f["field"] = h.ising_hamiltonian.field
+
+        x = solve_ising_model(h, seed=None, number_sweeps=number_sweeps, repetitions=repetitions)
         signs = extract_signs_from_bits(x, number_spins=h.size)
+
+        indices = np.searchsorted(h.spins, cluster.spins)
+        print(indices.shape)
+        assert np.all(h.spins[indices] == cluster.spins)
+        print(signs.shape)
         part = extract_bits_from_signs(signs[indices])
         results.append(part)
 
     return results
+
+
+def strongest_edge_statistics(cluster: IsingModel, full_signs, log_psi_fn):
+    assert len(full_signs) == cluster.quantum_hamiltonian.basis.number_states
+    extension = make_hamiltonian_extension(cluster, log_psi_fn)
+
+    # signs = np.si
+
+    pass
+
+    aligned = exact_signs[matrix.row] == exact_signs[matrix.col]
+    frustrated_mask = ((matrix.data > 0) & aligned) | ((matrix.data < 0) & ~aligned)
+    normal_mask = ((matrix.data > 0) & ~aligned) | ((matrix.data < 0) & aligned)
 
 
 def signs_to_bits(signs: NDArray[Any]) -> NDArray[np.uint64]:
@@ -739,17 +1202,7 @@ def extract_classical_ising_model(
 
 
 def extract_bits_from_signs(signs: NDArray[np.float64]) -> NDArray[np.uint64]:
-    signs = np.asarray(signs, dtype=np.float64)
-    if signs.ndim != 1:
-        raise ValueError("signs has invalid shape: {}".format(signs.shape))
-    n = len(signs)
-    out = np.empty((n + 63) // 64, dtype=np.uint64)
-    _build_matrix.lib.extract_signs(
-        n,
-        ffi.from_buffer("double const[]", signs),
-        ffi.from_buffer("uint64_t const[]", out),
-    )
-    return out
+    return sa.signs_to_bits(signs)
 
 
 def extract_signs_from_bits(bits: np.ndarray, number_spins: int) -> np.ndarray:
