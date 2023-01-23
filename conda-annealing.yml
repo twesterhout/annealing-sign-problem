@@ -5,7 +5,7 @@ channels:
 dependencies:
   - python=3.9
   - pip
-  - ising-glass-annealer =0.4.1.0
+  - ising-glass-annealer =0.4.1.2
   - lattice-symmetries =0.8.3
   - cffi
   - h5py
