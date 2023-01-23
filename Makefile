@@ -41,14 +41,33 @@ pyrochlore_32:
 		--seed $(SEED) \
 		--output experiments/pyrochlore_32.csv.wip$(JOBID) \
 		--order 2 \
-		--annealing True \
+		--annealing \
 		--global-cutoff 1e-5 \
 		--number-samples 1000
 
 .PHONY: kagome_36
 kagome_36:
 	$(PYTHON) experiments/sampled_connected_components.py \
-		--system kagome
+		--hdf5 physical_systems/data-large/heisenberg_kagome_36.h5 \
+		--yaml physical_systems/heisenberg_kagome_36.yaml \
+		--seed $(SEED) \
+		--output experiments/kagome_36.csv.wip$(JOBID) \
+		--order 2 \
+		--no-annealing \
+		--global-cutoff 1e-5 \
+		--number-samples 10000
+
+.PHONY: sk_32_1
+sk_32_1:
+	$(PYTHON) experiments/sampled_connected_components.py \
+		--hdf5 physical_systems/data-large/sk_32_1.h5 \
+		--yaml physical_systems/sk_32_1.yaml \
+		--seed $(SEED) \
+		--output experiments/sk_32_1.csv.wip$(JOBID) \
+		--order 2 \
+		--no-annealing \
+		--global-cutoff 1e-5 \
+		--number-samples 10000
 
 physical_systems/data-small:
 	mkdir -p $(@D) && \

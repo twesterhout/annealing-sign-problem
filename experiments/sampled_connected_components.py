@@ -712,7 +712,7 @@ def parse_command_line():
     parser.add_argument("--hdf5", type=str)
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--order", type=int, required=True)
-    parser.add_argument("--annealing", type=bool, default=False)
+    parser.add_argument("--annealing", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--global-cutoff", type=float, default=1e-4)
     parser.add_argument("--number-samples", type=int, default=5)
     parser.add_argument("--number-sweeps", type=int, default=5000)
@@ -744,10 +744,17 @@ def main():
 
     logger.info("Loading the ground state ...")
     hamiltonian = load_hamiltonian(yaml_filename)
-    ground_state, _, _representatives = load_ground_state(hdf5_filename)
+    ground_state, ground_state_energy, _representatives = load_ground_state(hdf5_filename)
     hamiltonian.basis.build(_representatives)
+    # actual_ground_state_energy = hamiltonian.expectation(ground_state)
+    # if not np.isclose(ground_state_energy, actual_ground_state_energy, rtol=1e-12):
+    #     raise AssertionError(
+    #         "mismatch for ground state energy: {} != {}"
+    #         "".format(ground_state_energy, actual_ground_state_energy)
+    #     )
     log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
 
+    print(args.annealing)
     clusters = generate_clusters(hamiltonian, ground_state, args)
 
     with open(args.output, "w") as f:
