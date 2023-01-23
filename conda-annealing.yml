@@ -1,6 +1,6 @@
 name: annealing_experiments
 channels:
-  - defaults
+  - conda-forge
   - twesterhout
 dependencies:
   - python=3.9
@@ -11,7 +11,7 @@ dependencies:
   - h5py
   - pyyaml
   - networkx
-  - numpy
+  - numpy =1.23.5
   - scipy
   - loguru
   - numba
