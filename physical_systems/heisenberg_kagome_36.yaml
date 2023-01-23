@@ -1,0 +1,42 @@
+# Same Hilbert space dimension and ground state energy as in
+# https://journals.aps.org/prb/abstract/10.1103/PhysRevB.47.5459
+#
+# Hilbert space dimension: 31527894
+# Ground state energy: -63.12622047596263
+# Time on AMD EPYC 7551 32-Core Processor: around 2 hours
+basis:
+  number_spins: 36
+  hamming_weight: 18
+  spin_inversion: 1
+  symmetries:
+      # Translation along x-direction
+    - permutation: [7, 12, 13, 14, 15, 30, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 6, 31, 32, 33, 34, 9, 10, 11, 0, 35, 16, 1, 2, 3, 4, 5, 8]
+      sector: 0
+      # Translation along y-direction
+    - permutation: [6, 10, 11, 12, 13, 14, 16, 17, 18, 4, 5, 20, 21, 22, 23, 24, 8, 27, 28, 29, 15, 30, 31, 32, 33, 34, 9, 19, 0, 35, 25, 26, 1, 2, 3, 7]
+      sector: 0
+      # 60-degree rotation
+    - permutation: [5, 4, 8, 15, 19, 26, 3, 14, 25, 0, 2, 7, 13, 18, 24, 29, 1, 12, 23, 34, 6, 11, 17, 22, 28, 33, 35, 10, 21, 32, 9, 16, 20, 27, 31, 30]
+      sector: 0
+      # Corner-axed mirror reflection - 1
+    - permutation: [0, 31, 32, 33, 34, 9, 27, 28, 29, 5, 20, 21, 22, 23, 24, 25, 16, 17, 18, 19, 10, 11, 12, 13, 14, 15, 30, 6, 7, 8, 26, 1, 2, 3, 4, 35]
+      sector: 0
+      # Corner-axed mirror reflection - 2
+    - permutation: [26, 1, 6, 10, 16, 5, 2, 11, 20, 35, 3, 7, 12, 17, 21, 27, 4, 13, 22, 31, 8, 14, 18, 23, 28, 32, 0, 15, 24, 33, 30, 19, 25, 29, 34, 9]
+      sector: 0
+      # Corner-axed mirror reflection - 3
+    - permutation: [30, 19, 15, 8, 4, 35, 25, 14, 3, 9, 29, 24, 18, 13, 7, 2, 34, 23, 12, 1, 33, 28, 22, 17, 11, 6, 26, 32, 21, 10, 0, 31, 27, 20, 16, 5]
+      sector: 0
+hamiltonian:
+  name: "Heisenberg Hamiltonian"
+  terms:
+    - matrix: [[1,  0,  0,  0],
+               [0, -1,  2,  0],
+               [0,  2, -1,  0],
+               [0,  0,  0,  1]]
+      sites: [[0, 1], [0, 2], [0, 31], [0, 32], [1, 2], [1, 6], [1, 26], [2, 3], [2, 7], [3, 4], [3, 7], [3, 35], [4, 5], [4, 8], [4, 35], [5, 8], [5, 16], [5, 20], [6, 10], [6, 11], [6, 26], [7, 12], [7, 13], [8, 14], [8, 15], [9, 10], [9, 16], [9, 29], [9, 34], [10, 11], [10, 16], [11, 12], [11, 17], [12, 13], [12, 17], [13, 14], [13, 18], [14, 15], [14, 18], [15, 19], [15, 30], [16, 20], [17, 21], [17, 22], [18, 23], [18, 24], [19, 25], [19, 26], [19, 30], [20, 21], [20, 27], [21, 22], [21, 27], [22, 23], [22, 28], [23, 24], [23, 28], [24, 25], [24, 29], [25, 26], [25, 29], [27, 30], [27, 31], [28, 32], [28, 33], [29, 34], [30, 31], [31, 32], [32, 33], [33, 34], [33, 35], [34, 35]]
+observables: []
+number_vectors: 1
+output: "data/heisenberg_kagome_36.h5"
+max_primme_block_size: 4
+max_primme_basis_size: 30
