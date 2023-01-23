@@ -1,8 +1,14 @@
 
 SPIN_ED = /vol/tcm01/westerhout_tom/spin-ed/SpinED-4c3305a
 PYTHON = python3
-SEED = 435834
 INPUT_DATA_URL = https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download
+JOBID =
+
+ifneq ($(JOBID),)
+  SEED = $(JOBID)
+else
+  SEED = 435834
+endif
 
 
 all:
@@ -30,11 +36,12 @@ experiments/%.csv: physical_systems/data-small/%.h5
 .PHONY: pyrochlore_32
 pyrochlore_32:
 	$(PYTHON) experiments/sampled_connected_components.py \
-		--hdf5 physical_systems/heisenberg_pyrochlore_2x2x2.h5 \
+		--hdf5 physical_systems/data-large/heisenberg_pyrochlore_2x2x2.h5 \
 		--yaml physical_systems/heisenberg_pyrochlore_2x2x2.yaml \
 		--seed $(SEED) \
-		--output experiments/pyrochlore_32.csv.wip \
-		--order 3 \
+		--output experiments/pyrochlore_32.csv.wip$(JOBID) \
+		--order 2 \
+		--annealing True \
 		--global-cutoff 1e-5 \
 		--number-samples 1000
 
@@ -47,6 +54,12 @@ physical_systems/data-small:
 	mkdir -p $(@D) && \
 	cd $(@D) && \
 	wget --no-verbose -O tmp.zip $(INPUT_DATA_URL)?path=/physical_systems/data-small && \
+	unzip tmp.zip && rm tmp.zip
+
+physical_systems/data-large:
+	mkdir -p $(@D) && \
+	cd $(@D) && \
+	wget --no-verbose -O tmp.zip $(INPUT_DATA_URL)?path=/physical_systems/data-large && \
 	unzip tmp.zip && rm tmp.zip
 
 # Initiall the hdf5 files were generated using the following rules:
