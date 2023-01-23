@@ -250,6 +250,25 @@ class Simulation:
         sizes = [np.sum(component_indices == i) for i in range(number_components)]
         logger.info("Number sizes: {}", sorted(sizes, reverse=True))
 
+        matrix = self.exact_model.ising_hamiltonian.exchange.tocoo().copy()
+        matrix.setdiag(0)
+        matrix.eliminate_zeros()
+        signs = sa.bits_to_signs(self.exact_model.initial_signs, n)
+        is_frustrated = signs[matrix.row] * signs[matrix.col] * matrix.data > 0
+
+        normal_histogram, bins = np.histogram(
+            np.log(matrix.data[np.invert(is_frustrated)]), bins=100
+        )
+        frustrated_histogram, _ = np.histogram(np.log(matrix.data[is_frustrated]), bins=bins)
+
+        # print(normal_histogram)
+        # print(frustrated_histogram)
+        prob_normal = normal_histogram / (frustrated_histogram + normal_histogram)
+        centers = 0.5 * (bins[1:] + bins[:-1])
+        np.savetxt("prob_square_4x4.txt", np.vstack([centers, prob_normal]).T)
+        # positive_histogram = np.histogram()
+        # positive_histogram = np.histogram(self.exact_model.ising_hamiltonian.exchange)
+
         exit(0)
 
         return self._analyze(xs, es, **kwargs)

@@ -30,7 +30,18 @@ experiments/%.csv: physical_systems/data-small/%.h5
 .PHONY: pyrochlore_32
 pyrochlore_32:
 	$(PYTHON) experiments/sampled_connected_components.py \
-		--system pyrochlore
+		--hdf5 physical_systems/heisenberg_pyrochlore_2x2x2.h5 \
+		--yaml physical_systems/heisenberg_pyrochlore_2x2x2.yaml \
+		--seed $(SEED) \
+		--output experiments/pyrochlore_32.csv.wip \
+		--order 3 \
+		--global-cutoff 1e-5 \
+		--number-samples 1000
+
+.PHONY: kagome_36
+kagome_36:
+	$(PYTHON) experiments/sampled_connected_components.py \
+		--system kagome
 
 physical_systems/data-small:
 	mkdir -p $(@D) && \
