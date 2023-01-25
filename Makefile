@@ -3,11 +3,18 @@ SPIN_ED = /vol/tcm01/westerhout_tom/spin-ed/SpinED-4c3305a
 PYTHON = python3
 INPUT_DATA_URL = https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download
 JOBID =
+NOISE = 0
 
 ifneq ($(JOBID),)
   SEED = $(JOBID)
 else
   SEED = 435834
+endif
+
+ifeq ($(NOISE),0)
+  EXTRA_PREFIX = no_noise
+else
+  EXTRA_PREFIX = noise_$(NOISE)
 endif
 
 
@@ -35,26 +42,30 @@ experiments/%.csv: physical_systems/data-small/%.h5
 
 .PHONY: pyrochlore_32
 pyrochlore_32:
+	@mkdir -p experiments/pyrochlore/$(EXTRA_PREFIX)
 	$(PYTHON) experiments/sampled_connected_components.py \
 		--hdf5 physical_systems/data-large/heisenberg_pyrochlore_2x2x2.h5 \
 		--yaml physical_systems/heisenberg_pyrochlore_2x2x2.yaml \
 		--seed $(SEED) \
-		--output experiments/pyrochlore_32.csv.wip$(JOBID) \
+		--output experiments/pyrochlore/$(EXTRA_PREFIX)/pyrochlore_32.csv$(JOBID) \
 		--order 2 \
-		--annealing \
+		--noise $(NOISE) \
+		--no-annealing \
 		--global-cutoff 1e-5 \
-		--number-samples 1000
+		--number-samples 10000
 
 .PHONY: kagome_36
 kagome_36:
+	@mkdir -p experiments/kagome/$(EXTRA_PREFIX)
 	$(PYTHON) experiments/sampled_connected_components.py \
 		--hdf5 physical_systems/data-large/heisenberg_kagome_36.h5 \
 		--yaml physical_systems/heisenberg_kagome_36.yaml \
 		--seed $(SEED) \
-		--output experiments/kagome_36.csv.wip$(JOBID) \
-		--order 2 \
+		--output experiments/kagome/$(EXTRA_PREFIX)/kagome_36.csv$(JOBID) \
+		--order 3 \
+		--noise $(NOISE) \
 		--no-annealing \
-		--global-cutoff 1e-5 \
+		--global-cutoff 2e-6 \
 		--number-samples 10000
 
 .PHONY: sk_32_1
@@ -64,10 +75,11 @@ sk_32_1:
 		--yaml physical_systems/sk_32_1.yaml \
 		--seed $(SEED) \
 		--output experiments/sk_32_1.csv.wip$(JOBID) \
-		--order 2 \
+		--order 3 \
+		--noise $(NOISE) \
 		--no-annealing \
 		--global-cutoff 1e-5 \
-		--number-samples 10000
+		--number-samples 10
 
 physical_systems/data-small:
 	mkdir -p $(@D) && \
