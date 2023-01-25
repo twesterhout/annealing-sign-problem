@@ -10,7 +10,7 @@ import networkx
 import numpy as np
 import scipy.sparse
 import yaml
-from numba import njit
+from numba import njit, prange
 from loguru import logger
 from numpy.typing import NDArray
 from scipy.sparse.csgraph import connected_components
@@ -56,7 +56,7 @@ class IsingModel:
 
 def _normalize_spins(spins) -> NDArray[np.uint64]:
     spins = np.asarray(spins, dtype=np.uint64, order="C")
-    if spins.ndim == 1:
+    if spins.ndim <= 1:
         spins = np.hstack([spins.reshape(-1, 1), np.zeros((spins.shape[0], 7), dtype=np.uint64)])
     elif spins.ndim == 2:
         if spins.shape[1] != 8:
@@ -81,6 +81,52 @@ def _make_ising_model_compute_elements(
     return elements, offsets
 
 
+def _batched_apply(hamiltonian, spins, chunk_size=10000):
+    assert hamiltonian.basis.number_spins <= 64, "TODO: only works with up to 64 bits"
+    n = spins.shape[0]
+    out_spins = []
+    out_coeffs = []
+    out_counts = []
+
+    start = 0
+    while start < n:
+        end = min(start + chunk_size, n)
+        x = _normalize_spins(spins[start:end])
+        other_spins, other_coeffs, other_counts = hamiltonian.batched_apply(x)
+        if not np.allclose(other_coeffs.imag, 0, atol=1e-6):
+            raise ValueError("expected all Hamiltonian matrix elements to be real")
+        other_coeffs = np.ascontiguousarray(other_coeffs.real)
+        other_spins = np.ascontiguousarray(other_spins[:, 0])
+        out_spins.append(other_spins)
+        out_coeffs.append(other_coeffs)
+        out_counts.append(other_counts)
+        start = end
+
+    return np.hstack(out_spins), np.hstack(out_coeffs), np.hstack(out_counts)
+
+
+@njit
+def invert_permutation(p):
+    s = np.empty_like(p)
+    s[p] = np.arange(p.size)
+    return s
+
+
+@njit(parallel=True)
+def _clipped_search_sorted(haystack, needles, chunk_size=5000):
+    n = needles.size
+    number_chunks = (n + chunk_size - 1) // chunk_size
+    indices = np.zeros(n, dtype=np.int64)
+    for i in prange(number_chunks):
+        start = i * chunk_size
+        end = min(start + chunk_size, n)
+        needles_chunk = needles[start:end]
+        order = np.argsort(needles_chunk)
+        index_chunk = np.searchsorted(haystack, needles_chunk[order])
+        indices[start:end] = np.clip(index_chunk[invert_permutation(order)], 0, haystack.size - 1)
+    return indices
+
+
 def make_ising_model(
     spins: NDArray[np.uint64],
     quantum_hamiltonian: ls.Operator,
@@ -95,7 +141,7 @@ def make_ising_model(
     if external_field and log_psi_fn is None:
         raise ValueError("log_psi_fn should be specified when external_field=True")
 
-    spins = _normalize_spins(spins)
+    spins = np.asarray(spins, dtype=np.uint64)
     spins, indices, counts = np.unique(spins, return_index=True, return_counts=True, axis=0)
     if np.any(counts != 1):
         logger.warning("'spins' were not unique, are you sure this is what you want?")
@@ -107,18 +153,22 @@ def make_ising_model(
         log_psi = log_psi_fn(spins)
     tick = time.time()
     n = spins.shape[0]
-    other_spins, other_coeffs, other_counts = quantum_hamiltonian.batched_apply(spins)
-    if not np.allclose(other_coeffs.imag, 0, atol=1e-6):
-        raise ValueError("expected all Hamiltonian matrix elements to be real")
-    other_coeffs = other_coeffs.real
+    other_spins, other_coeffs, other_counts = _batched_apply(quantum_hamiltonian, spins)
+    # quantum_hamiltonian.batched_apply(spins)
+    # if not np.allclose(other_coeffs.imag, 0, atol=1e-6):
+    #     raise ValueError("expected all Hamiltonian matrix elements to be real")
+    # other_coeffs = other_coeffs.real
     tock = time.time()
     logger.debug("batched_apply took {:.2f} seconds", tock - tick)
 
     tick = time.time()
-    assert quantum_hamiltonian.basis.number_spins <= 64, "TODO: only works with up to 64 bits"
-    spins = spins[:, 0]
-    other_spins = other_spins[:, 0]
-    other_indices = np.clip(np.searchsorted(spins, other_spins), 0, n - 1)
+    # assert quantum_hamiltonian.basis.number_spins <= 64, "TODO: only works with up to 64 bits"
+    # spins = spins[:, 0]
+    # other_spins = other_spins[:, 0]
+    # other_indices1 = np.clip(np.searchsorted(spins, other_spins), 0, n - 1)
+    other_indices = _clipped_search_sorted(spins, other_spins)
+    # assert np.array_equal(_indices1, _indices2)
+    # other_indices = _indices1
     belong_to_spins = other_spins == spins[other_indices]
     tock = time.time()
     logger.debug("searchsorted took {:.2f} seconds", tock - tick)
@@ -466,7 +516,7 @@ def make_hamiltonian_extension(
     model: IsingModel,
     log_psi_fn: Callable[[NDArray[np.uint64]], NDArray[np.float64]],
 ) -> IsingModel:
-    spins, _, _ = model.quantum_hamiltonian.batched_apply(model.spins)
+    spins, _, _ = _batched_apply(model.quantum_hamiltonian, model.spins)
     spins = np.unique(spins, axis=0)
     return make_ising_model(spins, model.quantum_hamiltonian, log_psi_fn=log_psi_fn)
 
@@ -754,3 +804,16 @@ def ground_state_to_log_coeff_fn(ground_state: np.ndarray, basis: ls.SpinBasis):
         return a + 1j * b
 
     return log_coeff_fn
+
+
+def add_noise_to_amplitudes(ground_state: NDArray[np.float64], eps: float):
+    ground_state = np.asarray(ground_state, dtype=np.float64, order="C")
+    assert ground_state.ndim == 1
+
+    log_amplitudes = np.log(np.abs(ground_state))
+    signs = np.sign(ground_state)
+
+    noise = eps * 2 * (np.random.rand(log_amplitudes.size) - 0.5)
+    noisy_ground_state = signs * np.exp(log_amplitudes + noise)
+    noisy_ground_state /= np.linalg.norm(noisy_ground_state)
+    return noisy_ground_state

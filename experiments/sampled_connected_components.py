@@ -669,39 +669,84 @@ def generate_clusters(hamiltonian, ground_state, args) -> List[NDArray[np.uint64
     return clusters
 
 
+@dataclass
+class OptimizationResult:
+    size: int
+    greedy_accuracy: float
+    greedy_overlap: float
+    sa_accuracy: float
+    sa_overlap: float
+    amplitude_overlap: float
+
+    def to_csv_str(self):
+        return "{},{:.8e},{:.8e},{:.8e},{:.8e},{:.8e}".format(
+            self.size,
+            self.greedy_accuracy,
+            self.greedy_overlap,
+            self.sa_accuracy,
+            self.sa_overlap,
+            self.amplitude_overlap,
+        )
+
+    @staticmethod
+    def csv_header():
+        return "size,greedy_accuracy,greedy_overlap,sa_accuracy,sa_overlap,amplitude_overlap"
+
+
 def solve_and_test_model(h, frozen_spins, exact_signs, weights, annealing):
     x = solve_ising_model(h, mode="greedy", frozen_spins=frozen_spins)
     greedy_accuracy, greedy_overlap = compute_accuracy_and_overlap(x, exact_signs, weights)
     logger.info("Greedy: accuracy: {:.3f}; overlap: {:.3f}", greedy_accuracy, greedy_overlap)
 
-    sa_accuracy = float("nan")
-    sa_overlap = float("nan")
     if annealing:
         x = solve_ising_model(h, mode="sa", frozen_spins=frozen_spins)
         sa_accuracy, sa_overlap = compute_accuracy_and_overlap(x, exact_signs, weights)
         logger.info("SA:     accuracy: {:.3f}; overlap: {:.3f}", sa_accuracy, sa_overlap)
-    return (h.size, greedy_accuracy, greedy_overlap, sa_accuracy, sa_overlap)
+    else:
+        sa_accuracy = float("nan")
+        sa_overlap = float("nan")
+
+    return OptimizationResult(
+        size=h.size,
+        greedy_accuracy=greedy_accuracy,
+        greedy_overlap=greedy_overlap,
+        sa_accuracy=sa_accuracy,
+        sa_overlap=sa_overlap,
+        amplitude_overlap=float("nan"),
+    )
 
 
-def process_cluster(cluster, hamiltonian, ground_state, log_coeff_fn, args):
-    indices = hamiltonian.basis.batched_index(cluster)
-    exact_psi = ground_state[indices]
+def amplitude_overlap(cluster, ground_state, noisy_ground_state, basis):
+    indices = basis.batched_index(cluster)
+    a = np.abs(ground_state[indices])
+    b = np.abs(noisy_ground_state[indices])
+    return np.dot(a, b) / np.linalg.norm(a) / np.linalg.norm(b)
+
+
+def process_cluster(
+    cluster, hamiltonian, ground_state, noisy_ground_state, noisy_log_coeff_fn, args
+):
+    basis = hamiltonian.basis
+    exact_psi = ground_state[basis.batched_index(cluster)]
     exact_signs = sa.signs_to_bits(np.sign(exact_psi))
     weights = exact_psi**2
     weights /= np.sum(weights)
 
     results = []
 
-    h = make_ising_model(cluster, hamiltonian, log_psi_fn=log_coeff_fn)
-    logger.debug("Extension №{}: there are {} spins in the cluster", 0, h.size)
-    results.append(solve_and_test_model(h, cluster, exact_signs, weights, args.annealing))
+    for i in range(args.order + 1):
+        if i == 0:
+            h = make_ising_model(cluster, hamiltonian, log_psi_fn=noisy_log_coeff_fn)
+            logger.debug("Extension №{}: there are {} spins in the cluster", 0, h.size)
+            pass
+        else:
+            h = make_hamiltonian_extension(h, noisy_log_coeff_fn)
+            logger.debug("Extension №{}: there are now {} spins in the cluster", i, h.size)
+            h = sparsify_using_global_cutoff(h, args.global_cutoff, cluster)
 
-    for i in range(args.order):
-        h = make_hamiltonian_extension(h, log_coeff_fn)
-        logger.debug("Extension №{}: there are now {} spins in the cluster", i + 1, h.size)
-        # h = sparsify_using_local_cutoff(h, 2, cluster)
-        h = sparsify_using_global_cutoff(h, args.global_cutoff, cluster)
-        results.append(solve_and_test_model(h, cluster, exact_signs, weights, args.annealing))
+        r = solve_and_test_model(h, cluster, exact_signs, weights, args.annealing)
+        r.amplitude_overlap = amplitude_overlap(h.spins, ground_state, noisy_ground_state, basis)
+        results.append(r)
 
     return results
 
@@ -712,6 +757,7 @@ def parse_command_line():
     parser.add_argument("--hdf5", type=str)
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--order", type=int, required=True)
+    parser.add_argument("--noise", type=float, default=0)
     parser.add_argument("--annealing", default=True, action=argparse.BooleanOptionalAction)
     parser.add_argument("--global-cutoff", type=float, default=1e-4)
     parser.add_argument("--number-samples", type=int, default=5)
@@ -744,34 +790,42 @@ def main():
 
     logger.info("Loading the ground state ...")
     hamiltonian = load_hamiltonian(yaml_filename)
-    ground_state, ground_state_energy, _representatives = load_ground_state(hdf5_filename)
+    ground_state, _, _representatives = load_ground_state(hdf5_filename)
     hamiltonian.basis.build(_representatives)
-    # actual_ground_state_energy = hamiltonian.expectation(ground_state)
-    # if not np.isclose(ground_state_energy, actual_ground_state_energy, rtol=1e-12):
-    #     raise AssertionError(
-    #         "mismatch for ground state energy: {} != {}"
-    #         "".format(ground_state_energy, actual_ground_state_energy)
-    #     )
-    log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
 
-    print(args.annealing)
+    if args.noise > 0:
+        noisy_ground_state = add_noise_to_amplitudes(ground_state, args.noise)
+    else:
+        noisy_ground_state = ground_state
+    noisy_log_coeff_fn = ground_state_to_log_coeff_fn(noisy_ground_state, hamiltonian.basis)
+
     clusters = generate_clusters(hamiltonian, ground_state, args)
 
     with open(args.output, "w") as f:
         f.write("# Generated by sampled_connected_components.py\n")
         f.write("# seed = {}\n".format(args.seed))
+        f.write("# order = {}\n".format(args.order))
+        f.write("# noise = {}\n".format(args.noise))
+        f.write("# global_cutoff = {}\n".format(args.global_cutoff))
         f.write("# sampled_power = {}\n".format(args.sampled_power))
         f.write("# min_cluster_size = {}\n".format(args.min_cluster_size))
         f.write("# max_cluster_size = {}\n".format(args.max_cluster_size))
         f.write("# keep_probability = {}\n".format(args.keep_probability))
         f.write("# number_sweeps = {}\n".format(args.number_sweeps))
         f.write("# repetitions = {}\n".format(args.repetitions))
-        f.write("# size,greedy_accuracy,greedy_overlap,sa_accuracy,sa_overlap\n")
+        f.write("# {}\n".format(OptimizationResult.csv_header()))
 
     logger.info("Optimizing clusters ...")
     for cluster in clusters:
-        columns = process_cluster(cluster, hamiltonian, ground_state, log_coeff_fn, args)
-        s = ",".join(map(str, sum(map(list, columns), [])))
+        columns = process_cluster(
+            cluster,
+            hamiltonian,
+            ground_state,
+            noisy_ground_state,
+            noisy_log_coeff_fn,
+            args,
+        )
+        s = ",".join(map(OptimizationResult.to_csv_str, columns))
         with open(args.output, "a") as f:
             f.write(s + "\n")
 
