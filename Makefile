@@ -4,6 +4,8 @@ PYTHON = python3
 INPUT_DATA_URL = https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download
 JOBID =
 NOISE = 0
+CUTOFF = 1e-6
+NUMBER_SAMPLES = 50000
 
 ifneq ($(JOBID),)
   SEED = $(JOBID)
@@ -42,44 +44,46 @@ experiments/%.csv: physical_systems/data-small/%.h5
 
 .PHONY: pyrochlore_32
 pyrochlore_32:
-	@mkdir -p experiments/pyrochlore/$(EXTRA_PREFIX)
+	@mkdir -p experiments/pyrochlore/noise_$(NOISE)/cutoff_$(CUTOFF)
 	$(PYTHON) experiments/sampled_connected_components.py \
 		--hdf5 physical_systems/data-large/heisenberg_pyrochlore_2x2x2.h5 \
 		--yaml physical_systems/heisenberg_pyrochlore_2x2x2.yaml \
 		--seed $(SEED) \
-		--output experiments/pyrochlore/$(EXTRA_PREFIX)/pyrochlore_32.csv$(JOBID) \
+		--output experiments/pyrochlore/noise_$(NOISE)/cutoff_$(CUTOFF)/pyrochlore_32.csv$(JOBID) \
 		--order 2 \
 		--noise $(NOISE) \
 		--no-annealing \
-		--global-cutoff 1e-5 \
-		--number-samples 10000
+		--global-cutoff $(CUTOFF) \
+		--number-samples $(NUMBER_SAMPLES)
 
 .PHONY: kagome_36
 kagome_36:
-	@mkdir -p experiments/kagome/$(EXTRA_PREFIX)
+	@mkdir -p experiments/kagome/noise_$(NOISE)/cutoff_$(CUTOFF)
 	$(PYTHON) experiments/sampled_connected_components.py \
 		--hdf5 physical_systems/data-large/heisenberg_kagome_36.h5 \
 		--yaml physical_systems/heisenberg_kagome_36.yaml \
 		--seed $(SEED) \
+		--output experiments/kagome/noise_$(NOISE)/cutoff_$(CUTOFF)/kagome_36.csv$(JOBID) \
 		--output experiments/kagome/$(EXTRA_PREFIX)/kagome_36.csv$(JOBID) \
 		--order 3 \
 		--noise $(NOISE) \
 		--no-annealing \
-		--global-cutoff 2e-6 \
-		--number-samples 10000
+		--global-cutoff $(CUTOFF) \
+		--number-samples $(NUMBER_SAMPLES)
 
 .PHONY: sk_32_1
 sk_32_1:
+	@mkdir -p experiments/sk/noise_$(NOISE)/cutoff_$(CUTOFF)
 	$(PYTHON) experiments/sampled_connected_components.py \
 		--hdf5 physical_systems/data-large/sk_32_1.h5 \
 		--yaml physical_systems/sk_32_1.yaml \
 		--seed $(SEED) \
-		--output experiments/sk_32_1.csv.wip$(JOBID) \
-		--order 3 \
+		--output experiments/sk/noise_$(NOISE)/cutoff_$(CUTOFF)/sk_32_1.csv$(JOBID) \
+		--order 2 \
 		--noise $(NOISE) \
 		--no-annealing \
-		--global-cutoff 1e-5 \
-		--number-samples 10
+		--global-cutoff $(CUTOFF) \
+		--number-samples $(NUMBER_SAMPLES)
 
 physical_systems/data-small:
 	mkdir -p $(@D) && \
