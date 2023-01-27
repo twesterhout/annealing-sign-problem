@@ -42,6 +42,19 @@ experiments/%.csv: physical_systems/data-small/%.h5
 		--repetitions 1024 && \
 	mv $@.wip $@
 
+experiments/noise/%.csv: physical_systems/data-small/%.h5
+	@mkdir -p experiments/noise
+	$(PYTHON) annealing_sign_problem/influence_of_noise.py \
+		--hdf5 physical_systems/data-small/$(*F).h5 \
+		--yaml physical_systems/$(*F).yaml \
+		--seed $(SEED) \
+		--output $@.wip \
+		--min-noise 1e-2 \
+		--max-noise 1e2 \
+		--steps 100 \
+		--repetitions 2 && \
+	mv $@.wip $@
+
 .PHONY: pyrochlore_32
 pyrochlore_32:
 	@mkdir -p experiments/pyrochlore/noise_$(NOISE)/cutoff_$(CUTOFF)
