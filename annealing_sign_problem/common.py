@@ -1,3 +1,4 @@
+import argparse
 import os
 import time
 from dataclasses import dataclass
@@ -787,6 +788,21 @@ def load_hamiltonian(filename: str) -> ls.Operator:
     return hamiltonian
 
 
+def load_input_files(args):
+    yaml_filename = args.yaml
+    if args.hdf5 is not None:
+        hdf5_filename = args.hdf5
+    else:
+        hdf5_filename = yaml_filename.replace(".yaml", ".h5")
+
+    logger.info("Loading the ground state ...")
+    hamiltonian = load_hamiltonian(yaml_filename)
+    ground_state, energy, _representatives = load_ground_state(hdf5_filename)
+    hamiltonian.basis.build(_representatives)
+    logger.info("Ground state energy is {}", energy)
+    return hamiltonian, ground_state
+
+
 def ground_state_to_log_coeff_fn(ground_state: np.ndarray, basis: ls.SpinBasis):
     ground_state = np.asarray(ground_state, dtype=np.float64, order="C")
     assert ground_state.ndim == 1
@@ -817,3 +833,50 @@ def add_noise_to_amplitudes(ground_state: NDArray[np.float64], eps: float):
     noisy_ground_state = signs * np.exp(log_amplitudes + noise)
     noisy_ground_state /= np.linalg.norm(noisy_ground_state)
     return noisy_ground_state
+
+
+def analyze_influence_of_noise():
+    parser = argparse.ArgumentParser(
+        description="Influence of noise on greedy optimization (small systems)."
+    )
+    parser.add_argument("--yaml", type=str, required=True)
+    parser.add_argument("--hdf5", type=str)
+    parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--seed", type=int, required=True)
+    parser.add_argument("--min-noise", type=float, default=1e-2)
+    parser.add_argument("--max-noise", type=float, default=1e2)
+    parser.add_argument("--steps", type=int, default=10)
+    parser.add_argument("--repetitions", type=int, default=10)
+    args = parser.parse_args()
+
+    if os.path.exists(args.output):
+        logger.error(
+            "Output file '{}' already exists: refusing to overwrite; "
+            "delete it manually if this is what you really want",
+            args.output,
+        )
+        return
+    np.random.seed(args.seed)
+    hamiltonian, ground_state = load_input_files(args)
+    basis = hamiltonian.basis
+    assert np.isclose(np.linalg.norm(ground_state), 1)
+    exact_signs = sa.signs_to_bits(np.sign(ground_state))
+    weights = ground_state**2
+
+    noise_levels = np.linspace(np.log(args.min_noise), np.log(args.max_noise), args.steps)
+    noise_levels = np.exp(noise_levels)
+
+    for i, eps in enumerate(noise_levels):
+        logger.info("[{}/{}] Testing with ɛ = {} ...", i + 1, args.steps, eps)
+
+        # results = np.zeros((args.repetitions, 2), dtype=np.float64)
+        with open(args.output, "a") as f:
+            for k in range(args.repetitions):
+                noisy_ground_state = add_noise_to_amplitudes(ground_state, eps=eps)
+                assert np.isclose(np.linalg.norm(noisy_ground_state), 1)
+                noisy_log_coeff_fn = ground_state_to_log_coeff_fn(noisy_ground_state, basis)
+                amplitude_overlap = np.dot(np.abs(noisy_ground_state), np.abs(ground_state))
+                h = make_ising_model(basis.states, hamiltonian, log_psi_fn=noisy_log_coeff_fn)
+                x = solve_ising_model(h, mode="greedy")
+                _, sign_overlap = compute_accuracy_and_overlap(x, exact_signs, weights)
+                f.write("{},{},{}\n".format(eps, amplitude_overlap, sign_overlap))
