@@ -64,8 +64,7 @@ kagome_36:
 		--yaml physical_systems/heisenberg_kagome_36.yaml \
 		--seed $(SEED) \
 		--output experiments/kagome/noise_$(NOISE)/cutoff_$(CUTOFF)/kagome_36.csv$(JOBID) \
-		--output experiments/kagome/$(EXTRA_PREFIX)/kagome_36.csv$(JOBID) \
-		--order 3 \
+		--order 2 \
 		--noise $(NOISE) \
 		--no-annealing \
 		--global-cutoff $(CUTOFF) \
