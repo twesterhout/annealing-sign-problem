@@ -880,3 +880,102 @@ def analyze_influence_of_noise():
                 x = solve_ising_model(h, mode="greedy")
                 _, sign_overlap = compute_accuracy_and_overlap(x, exact_signs, weights)
                 f.write("{},{},{}\n".format(eps, amplitude_overlap, sign_overlap))
+
+
+def postprocess_influence_of_noise(csv_file: str):
+    table = np.loadtxt(csv_file, delimiter=",")
+    edges = np.linspace(0, 1, 101)
+    x = 0.5 * (edges[1:] + edges[:-1])
+    median = np.zeros(len(x), dtype=np.float64)
+    upper = np.zeros(len(x), dtype=np.float64)
+    lower = np.zeros(len(x), dtype=np.float64)
+    amplitude_overlap = table[:, 1]
+    sign_overlap = table[:, 2]
+    for i in range(len(x)):
+        mask = (edges[i] < amplitude_overlap) & (amplitude_overlap <= edges[i + 1])
+        ys = sign_overlap[mask]
+        if len(ys) > 0:
+            assert np.all(ys <= 1)
+            # mean[i] = np.mean(ys)
+            m = np.percentile(ys, [25, 50, 75])
+            lower[i], median[i], upper[i] = m
+            # if mean[i] + std[i] > 1.0:
+            #     counts, hist_edges = np.histogram(ys)
+            #     np.savetxt(
+            #         "error.dat", np.vstack([0.5 * (hist_edges[1:] + hist_edges[:-1]), counts]).T
+            #     )
+            #     assert False
+        else:
+            median[i] = float("nan")
+            upper[i] = float("nan")
+            lower[i] = float("nan")
+
+    name = csv_file.replace(".csv", "_stats.csv")
+    with open(name, "w") as f:
+        f.write("amplitude_overlap,median,upper,lower\n")
+        np.savetxt(f, np.vstack([x, median, upper, lower]).T, delimiter=",")
+
+
+def analyze_coupling_distribution():
+    parser = argparse.ArgumentParser(description="How are couplings distributed?")
+    parser.add_argument("--yaml", type=str, required=True)
+    parser.add_argument("--hdf5", type=str)
+    parser.add_argument("--output", type=str, required=True)
+    args = parser.parse_args()
+
+    hamiltonian, ground_state = load_input_files(args)
+    basis = hamiltonian.basis
+    assert np.isclose(np.linalg.norm(ground_state), 1)
+    max_coeff = np.max(np.abs(ground_state))
+    logger.info("Max coeff: {}; max log coeff: {}", max_coeff, np.log(max_coeff))
+    log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, basis)
+    model = make_ising_model(basis.states, hamiltonian, log_psi_fn=log_coeff_fn)
+
+    matrix = model.ising_hamiltonian.exchange.tocoo()
+    matrix.setdiag(0)
+    matrix.eliminate_zeros()
+
+    couplings = np.sort(np.abs(matrix.data))[::-1]
+    np.savetxt(args.output, couplings)
+
+
+def analyze_probability_of_frustration():
+    parser = argparse.ArgumentParser(description="How often are couplings frustrated?")
+    parser.add_argument("--yaml", type=str, required=True)
+    parser.add_argument("--hdf5", type=str)
+    parser.add_argument("--output", type=str, required=True)
+    args = parser.parse_args()
+
+    hamiltonian, ground_state = load_input_files(args)
+    basis = hamiltonian.basis
+    assert np.isclose(np.linalg.norm(ground_state), 1)
+    log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, basis)
+    model = make_ising_model(basis.states, hamiltonian, log_psi_fn=log_coeff_fn)
+    signs = sa.bits_to_signs(model.initial_signs, model.size)
+
+    matrix = model.ising_hamiltonian.exchange.tocoo()
+    matrix.setdiag(0)
+    matrix.eliminate_zeros()
+
+    is_frustrated = signs[matrix.row] * signs[matrix.col] * matrix.data > 0
+
+    max_coupling = np.log(np.max(np.abs(matrix.data)))
+    min_coupling = max(max_coupling - 20, np.log(np.min(np.abs(matrix.data))))
+    logger.debug("min log coupling: {}; max log coupling: {}", min_coupling, max_coupling)
+
+    frustrated = np.log(np.abs(matrix.data[is_frustrated]))
+    frustrated = frustrated[(min_coupling <= frustrated) & (frustrated <= max_coupling)]
+    normal = np.log(np.abs(matrix.data[np.invert(is_frustrated)]))
+    normal = normal[(min_coupling <= normal) & (normal <= max_coupling)]
+
+    bins = np.linspace(min_coupling, max_coupling, 50)
+
+    frustrated_pdf, _ = np.histogram(frustrated, bins=bins, density=False)
+    normal_pdf, _ = np.histogram(normal, bins=bins, density=False)
+    # frustrated_pdf = frustrated.size * scipy.stats.gaussian_kde(frustrated, bw_method=bw_method)(x)
+    # normal_pdf = normal.size * scipy.stats.gaussian_kde(normal, bw_method=bw_method)(x)
+    y = normal_pdf / (normal_pdf + frustrated_pdf)
+    y[normal_pdf + frustrated_pdf < 100] = float("nan")
+
+    x = np.exp(0.5 * (bins[:-1] + bins[1:]))
+    np.savetxt(args.output, np.vstack([x, y]).T, delimiter=",")

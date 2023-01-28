@@ -44,10 +44,10 @@ plot \
     "" @points_border ls 4 pt 8 lc "black" ps 0.5 lw 1 notitle, \
     \
     "../experiments/sk_16_2.csv" @shade lc rgb "#9066A61E" notitle, \
-    "" @points ls 5 pt 9 ps 0.6 lw 2 title "16-site random, realization №1", \
+    "" @points ls 5 pt 9 ps 0.6 lw 2 title "16-site random, realization №2", \
     "" @points_border ls 5 pt 8 lc "black" ps 0.6 lw 1 notitle, \
     \
     "../experiments/sk_16_3.csv" @shade lc rgb "#90E6AB02" notitle, \
-    "" @points ls 6 pt 9 ps 0.6 lw 2 title "16-site random, realization №1", \
+    "" @points ls 6 pt 9 ps 0.6 lw 2 title "16-site random, realization №3", \
     "" @points_border ls 6 pt 8 lc "black" ps 0.6 lw 1 notitle, \
 

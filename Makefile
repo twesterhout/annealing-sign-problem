@@ -55,6 +55,29 @@ experiments/noise/%.csv: physical_systems/data-small/%.h5
 		--repetitions 2 && \
 	mv $@.wip $@
 
+experiments/couplings/%.csv: physical_systems/data-small/%.h5
+	@mkdir -p experiments/couplings
+	$(PYTHON) -c 'from annealing_sign_problem.common import *; analyze_coupling_distribution()' \
+		--hdf5 physical_systems/data-small/$(*F).h5 \
+		--yaml physical_systems/$(*F).yaml \
+		--output $@.wip && \
+	mv $@.wip $@
+
+is_frustrated: experiments/is_frustrated/heisenberg_kagome_16.csv \
+	experiments/is_frustrated/heisenberg_kagome_18.csv \
+	experiments/is_frustrated/j1j2_square_4x4.csv \
+	experiments/is_frustrated/sk_16_1.csv \
+	experiments/is_frustrated/sk_16_2.csv \
+	experiments/is_frustrated/sk_16_3.csv
+
+experiments/is_frustrated/%.csv: physical_systems/data-small/%.h5
+	@mkdir -p experiments/is_frustrated
+	$(PYTHON) -c 'from annealing_sign_problem.common import *; analyze_probability_of_frustration()' \
+		--hdf5 physical_systems/data-small/$(*F).h5 \
+		--yaml physical_systems/$(*F).yaml \
+		--output $@.wip && \
+	mv $@.wip $@
+
 .PHONY: pyrochlore_32
 pyrochlore_32:
 	@mkdir -p experiments/pyrochlore/noise_$(NOISE)/cutoff_$(CUTOFF)
