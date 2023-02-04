@@ -51,8 +51,8 @@ experiments/noise/%.csv: physical_systems/data-small/%.h5
 		--output $@.wip \
 		--min-noise 1e-2 \
 		--max-noise 1e2 \
-		--steps 100 \
-		--repetitions 2 && \
+		--steps 1000 \
+		--repetitions 100 && \
 	mv $@.wip $@
 
 .PHONY: pyrochlore_32
