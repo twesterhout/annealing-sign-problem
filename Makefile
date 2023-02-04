@@ -13,13 +13,6 @@ else
   SEED = 435834
 endif
 
-ifeq ($(NOISE),0)
-  EXTRA_PREFIX = no_noise
-else
-  EXTRA_PREFIX = noise_$(NOISE)
-endif
-
-
 all:
 
 .PHONY: small

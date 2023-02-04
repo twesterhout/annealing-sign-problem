@@ -4,4 +4,5 @@
 
 source /vol/tcm01/westerhout_tom/conda/etc/profile.d/conda.sh
 conda activate annealing_experiments
-make JOBID=$SLURM_JOBID NOISE=1e0 kagome_36 # pyrochlore_32
+# make JOBID=$SLURM_JOBID NOISE=0 CUTOFF=2e-6 NUMBER_SAMPLES=20000 kagome_36 # pyrochlore_32
+make experiments/noise/j1j2_square_4x4.csv
