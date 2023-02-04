@@ -13,10 +13,13 @@ from annealing_sign_problem import *
 
 
 class Simulation:
-    log_coeff_fn: Any
-    exact_model: IsingModel
+    # log_coeff_fn: Any
+    # exact_model: IsingModel
+    hamiltonian: ls.Operator
     ground_state: NDArray[np.float64]
     energy: float
+    exact_signs: NDArray[np.float64]
+    weights: NDArray[np.float64]
 
     def __init__(self, yaml_filename: str, hdf5_filename: str):
         hamiltonian = load_hamiltonian(yaml_filename)
@@ -25,17 +28,20 @@ class Simulation:
         basis.build(_representatives)
         logger.debug("Ground state energy is", ground_state_energy)
 
-        self.log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
+        # self.log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, hamiltonian.basis)
         # classical_hamiltonian, spins, x_exact, counts = extract_classical_ising_model(
         #     hamiltonian.basis.states, hamiltonian, log_coeff_fn
         # )
         # assert np.all(spins[:, 0] == hamiltonian.basis.states)
 
-        self.exact_model = make_ising_model(
-            hamiltonian.basis.states, hamiltonian, log_psi_fn=self.log_coeff_fn
-        )
-        self.ground_state = ground_state
+        # self.exact_model = make_ising_model(
+        #     hamiltonian.basis.states, hamiltonian, log_psi_fn=self.log_coeff_fn
+        # )
+        self.hamiltonian = hamiltonian
+        self.ground_state = ground_state / np.linalg.norm(ground_state)
         self.energy = ground_state_energy
+        self.exact_signs = np.sign(self.ground_state)
+        self.weights = self.ground_state**2
 
         # self.hamiltonian = hamiltonian
         # self.classical_hamiltonian = other_model.ising_hamiltonian # classical_hamiltonian
@@ -285,6 +291,10 @@ def parse_command_line():
     parser.add_argument("--seed", type=int, default=12345)
     return parser.parse_args()
 
+
+def analyze_influence_of_noise():
+
+    
 
 def main():
     args = parse_command_line()
