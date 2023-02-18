@@ -13,13 +13,6 @@ else
   SEED = 435834
 endif
 
-ifeq ($(NOISE),0)
-  EXTRA_PREFIX = no_noise
-else
-  EXTRA_PREFIX = noise_$(NOISE)
-endif
-
-
 all:
 
 .PHONY: small
@@ -51,8 +44,8 @@ experiments/noise/%.csv: physical_systems/data-small/%.h5
 		--output $@.wip \
 		--min-noise 1e-2 \
 		--max-noise 1e2 \
-		--steps 100 \
-		--repetitions 2 && \
+		--steps 1000 \
+		--repetitions 100 && \
 	mv $@.wip $@
 
 experiments/couplings/%.csv: physical_systems/data-small/%.h5
@@ -100,8 +93,7 @@ kagome_36:
 		--yaml physical_systems/heisenberg_kagome_36.yaml \
 		--seed $(SEED) \
 		--output experiments/kagome/noise_$(NOISE)/cutoff_$(CUTOFF)/kagome_36.csv$(JOBID) \
-		--output experiments/kagome/$(EXTRA_PREFIX)/kagome_36.csv$(JOBID) \
-		--order 3 \
+		--order 2 \
 		--noise $(NOISE) \
 		--no-annealing \
 		--global-cutoff $(CUTOFF) \
