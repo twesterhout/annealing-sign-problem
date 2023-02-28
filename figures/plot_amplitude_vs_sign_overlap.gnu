@@ -44,4 +44,15 @@ plot [0.1:][0.2:] \
     "" @points_border ls 2 pt 4 lc "black" ps 0.5 lw 1 notitle, \
     \
 
-
+set output "kagome_overlap_noisy.pdf"
+set ytics 0.2
+set xtics 0.1
+plot [0.5:1][0.2:] \
+    "_kagome_noisy.csv" \
+        u 3:5:7 w filledcurves lc rgb "#901b9e77" notitle, \
+    "" u 3:6 w p ls 1 pt 7 ps 1 lw 2 title "36-site Kagome lattice", \
+    "" u 3:6 w p ls 1 pt 6 ps 1 lw 2 lc rgb "black" notitle, \
+    "_kagome_noisy_3.csv" \
+        u 3:5:7 w filledcurves lc rgb "#901b9e77" notitle, \
+    "" u 3:6 w p ls 2 pt 7 ps 1 lw 2 title "36-site Kagome lattice (3rd order)", \
+    "" u 3:6 w p ls 2 pt 6 ps 1 lw 2 lc rgb "black" notitle
