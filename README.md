@@ -1,6 +1,58 @@
-# On the simplicity of sign structure of frustrated quantum systems
+<h1 align="center">
+Ground state sign structures of frustrated quantum systems as non-glassy Ising models
+</h1>
 
-# A few words about the data
+<div align="center">
+
+<img src="assets/construction_1f6a7.png" width="32">This is a research project that is not meant for general usage.<img src="assets/construction_1f6a7.png" width="32"><br>
+
+<br />
+
+[**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download)
+
+[![license](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg?style=flat-square)](LICENSE)
+
+</div>
+
+<table>
+<tr>
+<td>
+
+The non-trivial phase structure of the eigenstates of geometrically frustrated
+or finite-density electron systems is the main obstacle that severely limits
+the applicability of quantum Monte Carlo, variational, and machine learning
+methods in many important cases. In this paper, we focus on studying
+real-valued signful ground-state wave functions of several frustrated quantum
+spins systems. Under the assumption that the tasks of finding wave function
+amplitudes and signs can be separated, we show that the signs of the wave
+functions are easily reconstructed with almost perfect accuracy by means of
+combinatorial optimization. We map the problem of finding the wave function
+sign structure onto an auxiliary classical Ising model which is defined on a
+subset of the Hilbert space basis. Although the parental quantum system might
+be highly frustrated, we demonstrate that the Ising model does not exhibit
+significant frustrations and is solvable with a fully deterministic O(K log K)
+time algorithm (with K being the size of the Ising model). Given the ground
+state amplitudes, we reconstruct the signs of the wave functions of a
+fully-connected random Heisenberg model and the antiferromagnetic Heisenberg
+model on the Kagome lattice, thereby revealing the unelaborated hidden
+simplicity of many-body sign structures.
+
+</td>
+</tr>
+</table>
+
+If either this code base or the paper has benefited your research, consider citing it:
+
+```
+@article{westerhout2022unveiling,
+  title={Unveiling ground state sign structures of frustrated quantum systems via non-glassy Ising models},
+  author={Westerhout, Tom and Katsnelson, Mikhail I and Bagrov, Andrey A},
+  journal={arXiv preprint arXiv:2207.10675},
+  year={2022}
+}
+```
+
+## A few words about the data
 
 Our analysis consists of multiple stages.
 
@@ -44,7 +96,7 @@ All the HDF5 (`.h5`) files are available for download from
 [Surfdrive](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download).
 
 
-## Figure 2
+### Figure 2
 
 To generate the data, we used `make small`, for plotting, we used [this
 script](./figures/plot_annealing_on_small_systems.gnu). Raw data can be found
@@ -61,7 +113,7 @@ experiments
 └── sk_16_3.csv
 ```
 
-## Figure 3a
+### Figure 3a
 
 To generate the data, we used `make experiments/couplings/%.csv` where `%` is
 `heisenberg_kagome_16`, `heisenberg_kagome_18`, or `sk_16_3`. For plotting,
@@ -77,7 +129,7 @@ experiments/couplings
 └── sk_16_3.csv
 ```
 
-## Figure 3b
+### Figure 3b
 
 To generate the data, we used `make is_frustrated`. For plotting, [this
 script](./figures/plot_frustration_probability.gnu) was used. Raw data can be
@@ -93,11 +145,11 @@ experiments/is_frustrated
 └── sk_16_3.csv
 ```
 
-## Table 1
+### Table 1
 
 The data was generated using `make quality_check`.
 
-## Figure 4
+### Figure 4
 
 To generate the data, we used `make experiments/noise/%.csv` where `%` is
 `heisenberg_kagome_16`, `heisenberg_kagome_18`, or `sk_16_3`. For
@@ -122,7 +174,7 @@ experiments/lilo/noise/
 └── sk_16_3_stats.csv
 ```
 
-## Figure 6
+### Figure 6
 
 The data was generated using `make pyrochlore_32`, `make kagome_36`, or `make
 sk_32_1`. The Makefile also accepts the `NOISE` and `CUTOFF` arguments that can
@@ -149,7 +201,7 @@ generate various probability distributions. We then used
 [plot_overlap_integrated.gnu](./figures/plot_overlap_integrated.gnu), and
 [plot_size_density.gnu](./figures/plot_size_density.gnu) for plotting.
 
-## Figure 7
+### Figure 7
 
 The data from Figure 6 was reused. The plotting was done with [this
 script](./figures/plot_greedy_overlap_density.gnu).
