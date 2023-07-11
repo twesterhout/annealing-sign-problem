@@ -6,13 +6,10 @@ Ground state sign structures of frustrated quantum systems as non-glassy Ising m
 
 <img src="assets/construction_1f6a7.png" width="32">This is a research project that is not meant for general usage.<img src="assets/construction_1f6a7.png" width="32"><br>
 
-<br />
-
 [**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download)
 
 [![license](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg?style=flat-square)](LICENSE)
 
-</div>
 
 <table>
 <tr>
@@ -40,6 +37,10 @@ simplicity of many-body sign structures.
 </td>
 </tr>
 </table>
+
+</div>
+
+<br />
 
 If either this code base or the paper has benefited your research, consider citing it:
 
