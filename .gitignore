@@ -13,3 +13,8 @@ small_physical_systems.pdf
 subsystem_new.pdf
 experiments/snellius
 experiments/lilo
+*.egg-info/
+build/
+experiments/couplings/
+experiments/is_frustrated/
+experiments/noise/
