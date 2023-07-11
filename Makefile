@@ -5,6 +5,7 @@ INPUT_DATA_URL = https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/dow
 JOBID =
 NOISE = 0
 CUTOFF = 1e-6
+ORDER = 2
 NUMBER_SAMPLES = 50000
 
 ifneq ($(JOBID),)
@@ -56,6 +57,20 @@ experiments/couplings/%.csv: physical_systems/data-small/%.h5
 		--output $@.wip && \
 	mv $@.wip $@
 
+.PHONY: quality_check
+quality_check: experiments/greedy/heisenberg_kagome_16 \
+	experiments/greedy/heisenberg_kagome_18 \
+	experiments/greedy/j1j2_square_4x4 \
+	experiments/greedy/sk_16_1 \
+	experiments/greedy/sk_16_2 \
+	experiments/greedy/sk_16_3
+
+experiments/greedy/%: physical_systems/data-small/%.h5
+	@mkdir -p experiments/greedy
+	$(PYTHON) -c 'from annealing_sign_problem.common import *; check_greedy_algorithm_quality()' \
+		--hdf5 physical_systems/data-small/$(*F).h5 \
+		--yaml physical_systems/$(*F).yaml 2>/dev/null
+
 is_frustrated: experiments/is_frustrated/heisenberg_kagome_16.csv \
 	experiments/is_frustrated/heisenberg_kagome_18.csv \
 	experiments/is_frustrated/j1j2_square_4x4.csv \
@@ -79,7 +94,7 @@ pyrochlore_32:
 		--yaml physical_systems/heisenberg_pyrochlore_2x2x2.yaml \
 		--seed $(SEED) \
 		--output experiments/pyrochlore/noise_$(NOISE)/cutoff_$(CUTOFF)/pyrochlore_32.csv$(JOBID) \
-		--order 2 \
+		--order $(ORDER) \
 		--noise $(NOISE) \
 		--no-annealing \
 		--global-cutoff $(CUTOFF) \
@@ -93,7 +108,7 @@ kagome_36:
 		--yaml physical_systems/heisenberg_kagome_36.yaml \
 		--seed $(SEED) \
 		--output experiments/kagome/noise_$(NOISE)/cutoff_$(CUTOFF)/kagome_36.csv$(JOBID) \
-		--order 2 \
+		--order $(ORDER) \
 		--noise $(NOISE) \
 		--no-annealing \
 		--global-cutoff $(CUTOFF) \
@@ -107,7 +122,7 @@ sk_32_1:
 		--yaml physical_systems/sk_32_1.yaml \
 		--seed $(SEED) \
 		--output experiments/sk/noise_$(NOISE)/cutoff_$(CUTOFF)/sk_32_1.csv$(JOBID) \
-		--order 2 \
+		--order $(ORDER) \
 		--noise $(NOISE) \
 		--no-annealing \
 		--global-cutoff $(CUTOFF) \
