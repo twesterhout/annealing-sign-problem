@@ -7,3 +7,9 @@
 __pycache__/
 *.pt
 _*.csv
+transfer/
+Figure_*.pdf
+small_physical_systems.pdf
+subsystem_new.pdf
+experiments/snellius
+experiments/lilo
