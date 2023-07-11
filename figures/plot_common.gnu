@@ -1,4 +1,6 @@
 load "../experiments/palettes/dark2.pal"
+# Overwrite magenta because it's too bright
+set style line 4 lc rgb '#d0408a' 
 
 set datafile separator ","
 set border lt 1 lw 1 lc "black" front

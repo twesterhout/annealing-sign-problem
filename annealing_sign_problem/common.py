@@ -1000,3 +1000,26 @@ def analyze_probability_of_frustration():
 
     x = np.exp(0.5 * (bins[:-1] + bins[1:]))
     np.savetxt(args.output, np.vstack([x, y]).T, delimiter=",")
+
+
+def analyze_smallest_amplitude_overlap():
+    parser = argparse.ArgumentParser(description="How small can the amplitude overlap get?")
+    parser.add_argument("--hdf5", type=str)
+    parser.add_argument("--trials", default=100, type=int)
+    parser.add_argument("--seed", default=12345, type=int)
+    args = parser.parse_args()
+    np.random.seed(args.seed)
+
+    ground_state, _, _ = load_ground_state(args.hdf5)
+    ground_state = np.abs(ground_state)
+    assert np.isclose(np.linalg.norm(ground_state), 1)
+    logger.info("max amplitude: {}", np.max(ground_state))
+   
+    overlaps = np.zeros(args.trials)
+    for i in range(args.trials):
+        noise = np.random.rand(len(ground_state))
+        overlaps[i] = abs(np.dot(ground_state, noise)) / np.linalg.norm(noise)
+
+    m = np.percentile(overlaps, [25, 50, 75])
+    logger.info("mean: {}, median: {}, interquartile: {}", np.mean(overlaps), m[1], m[2] - m[0])
+

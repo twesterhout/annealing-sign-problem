@@ -4,22 +4,16 @@ set terminal pdfcairo size 8cm, 6cm \
     transparent enhanced color \
     font "Latin Modern Math,10"
 
-load "../experiments/palettes/dark2.pal"
+load "plot_common.gnu"
 
 set logscale x
 set xrange [80:300000]
-# set xtics ("10^2" 100, "10^3" 1000, "10^4" 10000, "10^5" 100000)
-# set xtics scale 1.5
 set ytics 0.25
 set yrange [0.1:1.05]
 set key bottom right
 
 set xlabel "Number of sweeps" font "Latin Modern Math,14"
 set ylabel "Probability of convergence" font "Latin Modern Math,14"
-
-set border lt 1 lw 1 lc "black" back
-set grid
-set datafile separator ","
 
 points = 'u (column("number_sweeps")):(column("acc_prob_mean")) with linespoints'
 points_border = 'u (column("number_sweeps")):(column("acc_prob_mean")) with points'

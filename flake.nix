@@ -45,11 +45,11 @@
             gnuplot_qt
             imagemagick
           ];
+          shellHook = ''
+            export PROMPT_COMMAND=""
+            export PS1='🐍 Python ${pkgs.python3.version} \w $ '
+          '';
         };
-        shellHook = ''
-          export PROMPT_COMMAND=""
-          export PS1='🐍 \w $ '
-        '';
       formatter = pkgs.nixpkgs-fmt;
     });
 }

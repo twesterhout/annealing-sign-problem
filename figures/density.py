@@ -1,5 +1,4 @@
 import numpy as np
-import os
 import re
 import glob
 import scipy
@@ -10,11 +9,20 @@ def _get_overlap(table, i):
     return table[:, 6 * i + 2]
 
 
-def estimate_overlap_pdf(table, bw_method=None, size_range=None, points=2000):
+def _get_amplitude_overlap(table, i):
+    return table[:, 6 * i + 5]
+
+
+def _select_correct_size(table, size_range):
     if size_range != None:
         min_size, max_size = size_range
         is_within_range = (min_size <= table[:, 0]) & (table[:, 0] <= max_size)
         table = table[is_within_range]
+    return table
+
+
+def estimate_overlap_pdf(table, bw_method=None, size_range=None, points=2000):
+    table = _select_correct_size(table, size_range)
     print("Using {} datapoints for KDE ...".format(table.shape[0]))
     order = table.shape[1] // 6
     kernels = [
@@ -27,7 +35,8 @@ def estimate_overlap_pdf(table, bw_method=None, size_range=None, points=2000):
     return y
 
 
-def estimate_overlap_integrated(table, points=500):
+def estimate_overlap_integrated(table, size_range=None, points=500):
+    table = _select_correct_size(table, size_range)
     order = table.shape[1] // 6
     xs = np.linspace(0, 1, points)
     ys = np.zeros((len(xs), order))
@@ -87,46 +96,67 @@ def process_results(system: str, noise: float, cutoff: float):
     ]
     data = [arr for arr in data if arr.shape[0] > 0]
     data = np.vstack(data)
-    for bw_method in [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, None]:
+
+    # for bw_method in [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, None]:
+    #     np.savetxt(
+    #         "_{}_overlap_pdf_{}.csv".format(system, bw_method),
+    #         estimate_overlap_pdf(data, bw_method),
+    #         delimiter=",",
+    #     )
+
+    # for bw_method in [0.01, 0.05, 0.1, None]:
+    #     np.savetxt(
+    #         "_{}_size_pdf_{}.csv".format(system, bw_method),
+    #         estimate_size_pdf(data, bw_method),
+    #         delimiter=",",
+    #     )
+
+    # np.savetxt(
+    #     "_{}_overlap_integrated.csv".format(system),
+    #     estimate_overlap_integrated(data, points=200),
+    #     delimiter=",",
+    # )
+
+    min_size = np.min(data[:, 0])
+    max_size = np.max(data[:, 0])
+    bins = np.round(np.exp(np.linspace(np.log(min_size), np.log(max_size), 5))).astype(
+        np.int32
+    )
+    size_ranges = list(zip(bins[:-1], bins[1:]))
+    for r in size_ranges:
         np.savetxt(
-            "_{}_overlap_pdf_{}.csv".format(system, bw_method),
-            estimate_overlap_pdf(data, bw_method),
+            "_{}_overlap_integrated_{}_{}.csv".format(system, r[0], r[1]),
+            estimate_overlap_integrated(data, size_range=r),
             delimiter=",",
         )
-    np.savetxt(
-        "_{}_overlap_integrated.csv".format(system),
-        estimate_overlap_integrated(data, points=200),
-        delimiter=",",
-    )
-    for bw_method in [0.01, 0.05, 0.1, None]:
-        np.savetxt(
-            "_{}_size_pdf_{}.csv".format(system, bw_method),
-            estimate_size_pdf(data, bw_method),
-            delimiter=",",
+
+
+def process_noisy_results(system: str = "kagome", cutoff: float = 2e-6, order: int = 3):
+    filename = "_{}_noisy_{}.csv".format(system, order)
+    with open(filename, "w") as out:
+        out.write(
+            "# noise, amplitude overlap (25, 50, and 75 percentile), "
+            "sign overlap (25, 50, and 75 percentile)\n"
         )
-
-
-def load_kagome(noise: str = "0"):
-    fs = glob.glob(
-        "../experiments/lilo/kagome/noise_{}/cutoff_2e-6/kagome_36.csv*".format(noise)
-    )
-    fs += glob.glob(
-        "../experiments/snellius/kagome/noise_{}/cutoff_2e-6/kagome_36.csv*".format(
-            noise
+    for m in sorted(walk_files(), key=lambda t: t["noise"]):
+        if m["system"] != system or not np.isclose(m["cutoff"], cutoff):
+            continue
+        data = np.loadtxt(m["original"], delimiter=",")
+        if data.shape[0] <= 100:
+            continue
+        if data.shape[1] < (order + 1) * 6:
+            continue
+        sign_overlap = np.percentile(_get_overlap(data, order), [25, 50, 75])
+        amplitude_overlap = np.percentile(
+            _get_amplitude_overlap(data, order), [25, 50, 75]
         )
-    )
-    data = []
-    for f in fs:
-        data.append(np.loadtxt(f, delimiter=","))
-    return np.vstack(data)
-
-
-def load_sk(noise: str = "0"):
-    fs = glob.glob(
-        "../experiments/lilo/sk/noise_{}/cutoff_2e-6/sk_32_1.csv*".format(noise)
-    )
-    data = [np.loadtxt(f, delimiter=",") for f in fs]
-    return np.vstack([t for t in data if t.shape[0] > 100])
+        print("noise={}: used {} data points".format(m["noise"], data.shape[0]))
+        with open(filename, "a") as out:
+            out.write(
+                "{},{},{},{},{},{},{}\n".format(
+                    m["noise"], *amplitude_overlap, *sign_overlap
+                ),
+            )
 
 
 def load_noisy_kagome():
@@ -159,25 +189,12 @@ def load_noisy_kagome():
             f.write(l + "\n")
 
 
-# def local_energies(filename: str):
-#     table = np.loadtxt(filename)
-#     kernels = [
-#         scipy.stats.gaussian_kde(table[:, 0], bw_method=0.07),
-#         scipy.stats.gaussian_kde(table[:, 1], bw_method=0.02),
-#     ]
-#     x = np.linspace(-0.65, -0.4, 1000)
-#     y = [kernel(x) for kernel in kernels]
-#     np.savetxt("density_of_states.{}".format(filename), np.vstack([x] + y).T)
-#     mask = (-0.6 < table[:, 1]) & (table[:, 1] < -0.4)
-#     print(np.mean(table[:, 0]))
-#     print(np.mean(table[mask, 1]))
-#
-#
 def main():
-    # process_results("pyrochlore", 0, 1e-5)
-    process_results("kagome", 0, 2e-6)
-    # process_results("sk", 0, 2e-6)
+    process_noisy_results(order=2)
     return
+    process_results("pyrochlore", 0, 1e-5)
+    process_results("kagome", 0, 2e-6)
+    process_results("sk", 0, 2e-6)
     # load_noisy_kagome()
     # return
 

@@ -4,32 +4,17 @@ set terminal pdfcairo size 8cm, 6cm \
     transparent enhanced color \
     font "Latin Modern Math,14"
 
-load "../experiments/palettes/dark2.pal"
+load "plot_common.gnu"
 
-# set logscale x
-# set xrange [80:300000]
-# set xtics ("10^2" 100, "10^3" 1000, "10^4" 10000, "10^5" 100000)
-# set xtics scale 1.5
-# set ytics 0.25
-# set yrange [0.1:1.05]
-set key top left width -2 font "Latin Modern Math,10"
-set grid ls 1 lw 1 lc rgb "#e0000000" dt (6, 8)
-
+set key top left
 set xlabel "Amplitude overlap" # font "Latin Modern Math,14"
 set ylabel "Sign overlap" # font "Latin Modern Math,14"
-
-# set border lt 1 lw 1 lc "black" back
-# set grid
-set datafile separator ","
-
-set output "amplitude_vs_sign_overlap.pdf"
-# plot [0.2:][0.2:] \
-#     "../experiments/lilo/noise/heisenberg_kagome_16.csv" u 2:3 w p ls 1 pt 7 ps 0.05 title "16-site Kagome lattice", \
 
 points = 'u (column("amplitude_overlap")):(column("median")) with points'
 points_border = 'u (column("amplitude_overlap")):(column("median")) with points'
 shade = 'u (column("amplitude_overlap")):(column("lower")):(column("upper")) with filledcurves'
 
+set output "amplitude_vs_sign_overlap.pdf"
 plot [0.1:][0.2:] \
     "../experiments/lilo/noise/heisenberg_kagome_16_stats.csv" @shade lc rgb "#b01B9E77" notitle, \
     "" @points ls 1 pt 7 ps 0.5 lw 2 title "16-site Kagome lattice", \
@@ -45,14 +30,27 @@ plot [0.1:][0.2:] \
     \
 
 set output "kagome_overlap_noisy.pdf"
+set key bottom right font "Latin Modern Math,12"
 set ytics 0.2
 set xtics 0.1
-plot [0.5:1][0.2:] \
-    "_kagome_noisy.csv" \
-        u 3:5:7 w filledcurves lc rgb "#901b9e77" notitle, \
-    "" u 3:6 w p ls 1 pt 7 ps 1 lw 2 title "36-site Kagome lattice", \
+plot [0.55:1][0.2:] \
+    "_kagome_noisy_2.csv" \
+        u 3:5:7 w filledcurves lc rgb "#701b9e77" notitle, \
+    "_kagome_noisy_3.csv" \
+        u 3:5:7 w filledcurves lc rgb "#70d95f02" notitle, \
+    "_kagome_noisy_2.csv" \
+        u 3:6 w p ls 1 pt 7 ps 1 lw 2 title "2nd extension", \
     "" u 3:6 w p ls 1 pt 6 ps 1 lw 2 lc rgb "black" notitle, \
     "_kagome_noisy_3.csv" \
-        u 3:5:7 w filledcurves lc rgb "#901b9e77" notitle, \
-    "" u 3:6 w p ls 2 pt 7 ps 1 lw 2 title "36-site Kagome lattice (3rd order)", \
-    "" u 3:6 w p ls 2 pt 6 ps 1 lw 2 lc rgb "black" notitle
+        u 3:6 w p ls 2 pt 5 ps 1 lw 2 title "3rd extension", \
+    "" u 3:6 w p ls 2 pt 4 ps 1 lw 2 lc rgb "black" notitle
+
+#           u (10**($1)):(0):(prob(2)) w filledcurves lc rgb "#701b9e77" notitle, \
+#        "" \
+#           u (10**($1)):(prob(2)) w l ls 1 lw 2.5 notitle, \
+#        "" \
+#           u (10**($1)):(0):(prob(3)) w filledcurves lc rgb "#707570b3" notitle, \
+#        "" \
+#           u (10**($1)):(prob(3)) w l ls 3 lw 2.5 notitle, \
+#        "" \
+#           u (10**($1)):(0):(prob(4)) w filledcurves lc rgb "#70d95f02" notitle, \

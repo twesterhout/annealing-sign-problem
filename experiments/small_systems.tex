@@ -5,16 +5,17 @@
 
 \begin{document}
 \begin{tikzpicture}
-    \begin{axis}[
+    \begin{semilogxaxis}[
         width=0.8\textwidth,
         height=0.6\textwidth,
         tick label style={font=\footnotesize},
         % label style={font=\small},
-        cycle list/Dark2-5,
+        cycle list/Dark2-6,
         % define fill color for the marker
         % mark list fill={.!75!white},
         % create new `cycle list` from existing `cycle list's and an
         % cycle multiindex* list={Set2-5\nextlist},
+        ymin=0,
         grid=major,
         xlabel={Number of sweeps},
         % ylabel={Probability of reaching $0.995$ accuracy},
@@ -51,12 +52,12 @@
     ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
         {data/sk_16_2.csv};
 
-    % \addplot+[
-    %     mark=triangle*,
-    %     mark size=3pt
-    % ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
-    %     {experiments/data/sk_16_3.csv};
+    \addplot+[
+        mark=triangle*,
+        mark size=3pt
+    ] table [col sep=comma,x=number_sweeps,y=accuracy_prob]
+        {data/sk_16_3.csv};
 
-    \end{axis}
+    \end{semilogxaxis}
 \end{tikzpicture}
 \end{document}

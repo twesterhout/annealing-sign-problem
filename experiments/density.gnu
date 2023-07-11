@@ -2,7 +2,7 @@
 
 set terminal pdfcairo size 4cm, 3cm \
     transparent enhanced color \
-    font "Latin Modern Math,9"
+    font "Latin Modern Math,8"
 
 load "palettes/spectral.pal"
 
@@ -27,7 +27,7 @@ plot [:][:100] "density_of_states.pyrochlore_sampled_power=0.1_cutoff=0.0002.dat
 
 set output "density_kagome.pdf"
 set ytics 0,4
-plot "density_of_states.kagome_sampled_power=0.1_cutoff=0.0002.dat" \
+plot [:][0:16] "density_of_states.kagome_sampled_power=0.1_cutoff=0.0002.dat" \
         u 1:2 w l ls 8 lw 2 title "not extended", \
      "" u 1:3 w l ls 7 lw 2 title "extended once", \
      "" u 1:4 w l ls 3 lw 2 title "extended twice", \

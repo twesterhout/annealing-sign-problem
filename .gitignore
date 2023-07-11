@@ -6,3 +6,4 @@
 *.sif
 __pycache__/
 *.pt
+_*.csv

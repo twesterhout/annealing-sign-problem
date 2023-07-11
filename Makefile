@@ -17,8 +17,6 @@ endif
 all:
 
 .PHONY: small
-# small: experiments/j1j2_square_4x4.csv
-	
 small: experiments/heisenberg_kagome_16.csv \
 	experiments/heisenberg_kagome_18.csv \
 	experiments/j1j2_square_4x4.csv \
@@ -85,6 +83,20 @@ experiments/is_frustrated/%.csv: physical_systems/data-small/%.h5
 		--yaml physical_systems/$(*F).yaml \
 		--output $@.wip && \
 	mv $@.wip $@
+
+.PHONY: small_amplitude_overlaps
+small_amplitude_overlaps: \
+	experiments/small_amplitude_overlap/heisenberg_kagome_16.csv \
+	experiments/small_amplitude_overlap/heisenberg_kagome_18.csv \
+	experiments/small_amplitude_overlap/j1j2_square_4x4.csv \
+	experiments/small_amplitude_overlap/sk_16_1.csv \
+	experiments/small_amplitude_overlap/sk_16_2.csv \
+	experiments/small_amplitude_overlap/sk_16_3.csv
+
+experiments/small_amplitude_overlap/%.csv: physical_systems/data-small/%.h5
+	$(PYTHON) -c 'from annealing_sign_problem.common import *; analyze_smallest_amplitude_overlap()' \
+		--hdf5 physical_systems/data-small/$(*F).h5 \
+		--seed $(SEED)
 
 .PHONY: pyrochlore_32
 pyrochlore_32:
