@@ -32,8 +32,8 @@ plot [1e-11:1.9e-2][0.4:1.0] \
         fillstyle transparent solid 0.5 title "16-site Kagome lattice", \
     "../experiments/is_frustrated/heisenberg_kagome_18.csv" u 1:2 w boxes ls 2 lw 2 \
         fillstyle transparent solid 0.6 title "18-site Kagome lattice", \
-    "../experiments/is_frustrated/sk_16_3.csv" u 1:2 w boxes ls 3 lw 2 \
-        fillstyle transparent solid 0.7 title "16-site random, realization №3", \
+    "../experiments/is_frustrated/sk_16_3.csv" u 1:2 w boxes ls 3 lw 2 lc rgb "#ff8985be" \
+        fillstyle transparent solid 1.0 border lc "#ff7570b3" title "16-site random, realization №3", \
 
 set output
 system("convert -density 600 frustration_probability.pdf -quality 00 frustration_probability.png")

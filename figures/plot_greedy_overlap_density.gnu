@@ -51,7 +51,60 @@ plot [0:1] \
      "" \
         u 1:4 w l ls 2 lw 2.5 notitle, \
 
+set output "kagome_overlap_pdf_noisy.pdf"
+set ytics 2
+plot [0:1] \
+     "_kagome_overlap_pdf.csv" \
+        u 1:(0):4 w filledcurves lc rgb "#601b9e77" notitle, \
+     "" \
+        u 1:4 w l ls 1 lw 2.5 notitle, \
+     "_kagome_overlap_pdf_5e-1.csv" \
+        u 1:(0):4 w filledcurves lc rgb "#707570b3" notitle, \
+     "" \
+        u 1:4 w l ls 3 lw 2.5 notitle, \
+     "_kagome_overlap_pdf_1e0.csv" \
+        u 1:(0):4 w filledcurves lc rgb "#80d95f02" notitle, \
+     "" \
+        u 1:4 w l ls 2 lw 2.5 notitle, \
+     "_kagome_overlap_pdf_2e0.csv" \
+        u 1:(0):4 w filledcurves lc rgb "#80e7298a" notitle, \
+     "" \
+        u 1:4 w l ls 4 lw 2.5 notitle, \
 
+prob(i) = column(i) > 1e-2 ? column(i) : 1/0
+
+set output "kagome_amplitude_overlap_pdf_noisy.pdf"
+set ytics 20
+plot [0:1][0:100] \
+     "_kagome_amplitude_overlap_pdf_5e-1.csv" \
+        u 1:(0):(prob(4)) w filledcurves lc rgb "#807570b3" notitle, \
+     "" \
+        u 1:(prob(4)) w l ls 3 lw 2.5 notitle, \
+     "_kagome_amplitude_overlap_pdf_1e0.csv" \
+        u 1:(0):(prob(4)) w filledcurves lc rgb "#80d95f02" notitle, \
+     "" \
+        u 1:(prob(4)) w l ls 2 lw 2.5 notitle, \
+     "_kagome_amplitude_overlap_pdf_2e0.csv" \
+        u 1:(0):(prob(4)) w filledcurves lc rgb "#80e7298a" notitle, \
+     "" \
+        u 1:(prob(4)) w l ls 4 lw 2.5 notitle, \
+
+
+set output "sk_overlap_pdf.pdf"
+set ytics 2
+plot [0:1] \
+     "_sk_overlap_pdf.csv" \
+        u 1:(0):2 w filledcurves lc rgb "#601b9e77" notitle, \
+     "" \
+        u 1:2 w l ls 1 lw 2.5 notitle, \
+     "" \
+        u 1:(0):3 w filledcurves lc rgb "#707570b3" notitle, \
+     "" \
+        u 1:3 w l ls 3 lw 2.5 notitle, \
+     "" \
+        u 1:(0):4 w filledcurves lc rgb "#80d95f02" notitle, \
+     "" \
+        u 1:4 w l ls 2 lw 2.5 notitle, \
 
 # set output "density_kagome.pdf"
 # set ytics 0,4
@@ -74,7 +127,7 @@ plot [0:1] \
 #         done")
 
 set output
-system("for m in pyrochlore kagome; do \
+system("for m in pyrochlore kagome sk; do \
           convert -density 600 ${m}_overlap_pdf.pdf -quality 00 ${m}_overlap_pdf.png; \
         done")
 
