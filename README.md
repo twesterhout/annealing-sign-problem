@@ -6,7 +6,7 @@ Ground state sign structures of frustrated quantum systems as non-glassy Ising m
 
 <img src="assets/construction_1f6a7.png" width="32">This is a research project that is not meant for general usage.<img src="assets/construction_1f6a7.png" width="32"><br>
 
-[**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download)
+[**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk)
 
 [![license](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg?style=flat-square)](LICENSE)
 
@@ -94,7 +94,7 @@ physical_systems
 ```
 
 All the HDF5 (`.h5`) files are available for download from
-[Surfdrive](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk/download).
+[Surfdrive](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk).
 
 
 ### Figure 2
