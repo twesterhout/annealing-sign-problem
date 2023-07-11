@@ -835,6 +835,27 @@ def add_noise_to_amplitudes(ground_state: NDArray[np.float64], eps: float):
     return noisy_ground_state
 
 
+def check_greedy_algorithm_quality():
+    parser = argparse.ArgumentParser(
+        description="Quality of the greedy optimization algorithm on small systems."
+    )
+    parser.add_argument("--yaml", type=str, required=True)
+    parser.add_argument("--hdf5", type=str)
+    args = parser.parse_args()
+
+    hamiltonian, ground_state = load_input_files(args)
+    basis = hamiltonian.basis
+    assert np.isclose(np.linalg.norm(ground_state), 1)
+    exact_signs = sa.signs_to_bits(np.sign(ground_state))
+    weights = ground_state**2
+
+    log_coeff_fn = ground_state_to_log_coeff_fn(ground_state, basis)
+    h = make_ising_model(basis.states, hamiltonian, log_psi_fn=log_coeff_fn)
+    x = solve_ising_model(h, mode="greedy")
+    sign_accuracy, sign_overlap = compute_accuracy_and_overlap(x, exact_signs, weights)
+    print("{},{}".format(sign_accuracy, sign_overlap))
+
+
 def analyze_influence_of_noise():
     parser = argparse.ArgumentParser(
         description="Influence of noise on greedy optimization (small systems)."
