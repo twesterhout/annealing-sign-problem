@@ -8,7 +8,7 @@ Many-body quantum sign structures as non-glassy Ising models
 
 [**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://doi.org/10.5281/zenodo.8221180)
 
-[![License](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg?style=flat-square)](LICENSE)
+[![License](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg)](LICENSE)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.8221332.svg)](https://doi.org/10.5281/zenodo.8221332)
 
 <table>
