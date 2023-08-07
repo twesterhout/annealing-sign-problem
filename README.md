@@ -1,12 +1,12 @@
 <h1 align="center">
-Ground state sign structures of frustrated quantum systems as non-glassy Ising models
+Many-body quantum sign structures as non-glassy Ising models
 </h1>
 
 <div align="center">
 
 <img src="assets/construction_1f6a7.png" width="32">This is a research project that is not meant for general usage.<img src="assets/construction_1f6a7.png" width="32"><br>
 
-[**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk)
+[**Paper**](https://arxiv.org/abs/2207.10675) | [**Data**](https://doi.org/10.5281/zenodo.8221180)
 
 [![license](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg?style=flat-square)](LICENSE)
 
@@ -15,23 +15,16 @@ Ground state sign structures of frustrated quantum systems as non-glassy Ising m
 <tr>
 <td>
 
-The non-trivial phase structure of the eigenstates of geometrically frustrated
-or finite-density electron systems is the main obstacle that severely limits
-the applicability of quantum Monte Carlo, variational, and machine learning
-methods in many important cases. In this paper, we focus on studying
-real-valued signful ground-state wave functions of several frustrated quantum
-spins systems. Under the assumption that the tasks of finding wave function
-amplitudes and signs can be separated, we show that the signs of the wave
-functions are easily reconstructed with almost perfect accuracy by means of
-combinatorial optimization. We map the problem of finding the wave function
-sign structure onto an auxiliary classical Ising model which is defined on a
-subset of the Hilbert space basis. Although the parental quantum system might
-be highly frustrated, we demonstrate that the Ising model does not exhibit
-significant frustrations and is solvable with a fully deterministic O(K log K)
-time algorithm (with K being the size of the Ising model). Given the ground
-state amplitudes, we reconstruct the signs of the wave functions of a
-fully-connected random Heisenberg model and the antiferromagnetic Heisenberg
-model on the Kagome lattice, thereby revealing the unelaborated hidden
+The non-trivial phase structure of the eigenstates of many-body quantum systems
+severely limits the applicability of quantum Monte Carlo, variational, and machine learning methods.
+Here, we study real-valued signful ground-state wave functions of frustrated quantum spin systems
+and, assuming that the tasks of finding wave function amplitudes and signs can be separated, show
+that the signs can be easily bootstrapped from the amplitudes. We map the problem of finding the
+sign structure to an auxiliary classical Ising model defined on a subset of the Hilbert space basis.
+We show that the Ising model does not exhibit significant frustrations even for highly frustrated
+parental quantum systems, and is solvable with a fully deterministic O(K log K)-time combinatorial
+algorithm (where K is the Ising model size). Given the ground state amplitudes, we reconstruct
+the signs of the ground states of several frustrated quantum models, thereby revealing the hidden
 simplicity of many-body sign structures.
 
 </td>
@@ -94,7 +87,7 @@ physical_systems
 ```
 
 All the HDF5 (`.h5`) files are available for download from
-[Surfdrive](https://surfdrive.surf.nl/files/index.php/s/Ec5CILNO5tbXlVk).
+[Zenodo](https://doi.org/10.5281/zenodo.8221180)
 
 
 ### Figure 2
@@ -206,3 +199,7 @@ generate various probability distributions. We then used
 
 The data from Figure 6 was reused. The plotting was done with [this
 script](./figures/plot_greedy_overlap_density.gnu).
+
+### Supplemental information
+
+Data for the figures in the Supplemental Information were be generated similarly to those in the main text.
