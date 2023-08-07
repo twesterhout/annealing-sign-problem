@@ -10,7 +10,6 @@ Many-body quantum sign structures as non-glassy Ising models
 
 [![license](https://img.shields.io/github/license/twesterhout/annealing-sign-problem.svg?style=flat-square)](LICENSE)
 
-
 <table>
 <tr>
 <td>
